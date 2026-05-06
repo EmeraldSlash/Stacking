@@ -2,7 +2,7 @@
 
 -- Camera Stacker
 -- Created by @EmeraldSlash
--- Version: 1 (2026-05-06)
+-- Version: 2 (2026-05-07)
 
 -- Sets whether microprofiler labels are turned on or not.
 local PRF_ON = true
@@ -257,22 +257,54 @@ export type CameraBlockBase = {
 
 	-- Built-in and user-defined blendable values, such as camera cframe, focus,
 	-- field of view.
+	--
+	-- This table is primarily useful for "absolute" effects such as moving the
+	-- camera to a particular location or reaching a particular value.
+	--
 	Blendables: {[Blendable<any>]: any};
 
+	-- Custom functions to blend this CB's Blendables with lower priority
+	-- Blendables. Does not require the Blendable to be in the Blendables table.
+	--
+	-- This table is primarily useful for "relative" effects such as camera shake
+	-- which need to make arbitrary decisions based on what lower priority
+	-- blocks produce.
+	--
+	-- These functions will execute after Eval, so you can update relevant state
+	-- first in Eval, then read it from these functions.
+	--
+	-- The ValueLow argument will be nil if the Blendable isn't available from the
+	-- lower priority block, but you can expect it to be guaranteed for the
+	-- built-in B_CFrame and B_Focus blendables (unless a lower priority block
+	-- intentionally returns nil).
+	--
+	-- If you want to obtain the "ValueHigh" (AKA the current block's value), you
+	-- can define a value in the Blendables table and use that in its
+	-- corresponding Blend function. That scenario will work without issue and is
+	-- officialy suppported. Alternatively, you just avoid putting stuff in the
+	-- Blendables table and instead construct what you need from scratch or use
+	-- intermediate values stored as custom fields in the block. Those
+	-- alternatives may make more sense organizationally in many secnarios as
+	-- they avoid mixing "absolute" and "relative" values.
+	--
+	Blends: {[Blendable<any>]: (CB: CameraBlock, ValueLow: any?)->(any?)};
+
 	-- These two fields behave the same as the corresponding Blendable fields,
-	-- but will force their behavior for all Blendables assigned to this
-	-- CameraBlock. A quick way to say "this CameraBlock is exclusive".
+	-- but will force their behavior for all Blendables consumed or produced by
+	-- this CameraBlock. A quick way to say "this CameraBlock is exclusive".
 	ExclusiveLo: boolean?;
 	ExclusiveHi: boolean?;
 
-	-- This function should take the CameraBlock and the DeltaTime, and update
-	-- the EVAL OUTPUT BELOWS (defined below). This function will be run every
+	-- This function should take the CameraBlock and the DeltaTime, and update s
+	-- the EVAL OUTPUT VALUES (defined below). This function will be run every
 	-- frame, after the CB has been activated via CB:SetActive(true). It should
 	-- check CB.Active == false to know when the user has requested a
 	-- deactivation. It should return true if the CB is done (has been
 	-- deactivated and/or no longer needs to run updates every frame), or false
 	-- if it should continue running in future frames. If this function is not
-	-- set, the CB will be done immediately if CB.Active == false.
+	-- set, the CB will be done immediately if CB.Active == false. This function
+	-- can also be used to arbitrarily modify the Blendables, Blends,
+	-- ExclusiveLo, and ExclusiveHi fields. But DO NOT MODIFY the Priority field.
 	Eval: ((CB: CameraBlock, DeltaTime: number)->(boolean))?;
 
 	-- EVAL OUTPUT VALUES (these can be statically configured if Eval is not
@@ -281,13 +313,15 @@ export type CameraBlockBase = {
 	-- Defines the strength of how values will be blended on top of whatever is
 	-- beneath it. (Or whatever the blend function for a blendable property is.)
 	-- This ONLY affects blending, it does not affect the camera stack behaviour.
-	-- If this unset, it will default to 1.
+	-- If this unset, it will default to 1. The use of this field is only
+	-- required for blending without custom blend functions, as custom blend
+	-- functions have a choice of whether to use this field or something else.
 	Strength: number?;
-	-- Defines whether camera input should be disabled or not. (Per-frame result
-	-- is the union of all camera blocks.)
+	-- Defines whether camera input should be disabled or not. (Final per-frame
+	-- result is the union of all camera blocks.)
 	DisableInput: boolean?;
 	-- Defines whether the camera occlusion module should be disabled or not.
-	-- (Per-frame result is the union of all camera blocks.)
+	-- (Final per-frame result is the union of all camera blocks.)
 	DisableOcclusion: boolean?;
 }
 export type CameraBlock = CameraBlockBase & {
@@ -339,9 +373,10 @@ do
 			end
 			CameraStacker.CB_ById[CB.Id] = CB
 		end
-		CB.Traceback = debug.traceback(nil, 2)
-		CB.Blendables = CB.Blendables or {}
 		CB.Priority = CB.Priority or {}
+		CB.Blendables = CB.Blendables or {}
+		CB.Blends = CB.Blends or {}
+		CB.Traceback = debug.traceback(nil, 2)
 		setmetatable(CB, MetaCB)
 		return CB
 	end
@@ -548,30 +583,52 @@ local function CameraStackerBlend(
 			if Low == nil then
 				Low = Blendable.Default
 			end
-			local Strength = math.clamp(CB.Strength or 1, 0, 1)
-			if Strength <= 0 then
-				BlendedValues[Blendable] = Low
-			elseif not Low then
-				BlendedValues[Blendable] = High
-			elseif Blendable.Blend then
-				BlendedValues[Blendable] = Blendable.Blend(Low, High, Strength)
+			local Blend = CB.Blends[Blendable]
+			if Blend then
+				BlendedValues[Blendable] = Blend(CB, Low)
 			else
-				local TypeT = typeof(High)
-				local TypeB = typeof(Low)
-				if TypeT ~= TypeB then
+				local Strength = math.clamp(CB.Strength or 1, 0, 1)
+				if Strength <= 0 then
+					BlendedValues[Blendable] = Low
+				elseif not Low then
 					BlendedValues[Blendable] = High
-				elseif TypeT == "number" then
-					BlendedValues[Blendable] = math.lerp(Low, High, Strength)
-				elseif TypeT == "Vector3" then
-					BlendedValues[Blendable] = V3_Lerp(Low, High, Strength)
-				elseif TypeT == "CFrame" then
-					BlendedValues[Blendable] = CF_Lerp(Low,  High, Strength)
+				elseif Blendable.Blend then
+					BlendedValues[Blendable] = Blendable.Blend(Low, High, Strength)
 				else
-					BlendedValues[Blendable] = High
+					local TypeT = typeof(High)
+					local TypeB = typeof(Low)
+					if TypeT ~= TypeB then
+						BlendedValues[Blendable] = High
+					elseif TypeT == "number" then
+						BlendedValues[Blendable] = math.lerp(Low, High, Strength)
+					elseif TypeT == "Vector3" then
+						BlendedValues[Blendable] = V3_Lerp(Low, High, Strength)
+					elseif TypeT == "CFrame" then
+						BlendedValues[Blendable] = CF_Lerp(Low,  High, Strength)
+					else
+						BlendedValues[Blendable] = High
+					end
 				end
 			end
 			WasExclusiveHi_ByBlendable[Blendable] = nil
 			NewExclusiveHi_ByBlendable[Blendable] = if Blendable.ExclusiveHi then true else false
+		end
+		for Blendable, Blend in CB.Blends do
+			if not CB.Blendables[Blendable] then
+				local Low = nil
+				if (not CB.ExclusiveLo) and
+					(not Blendable.ExclusiveLo) and
+					(not WasExclusiveHi_ByBlendable[Blendable])
+				then
+					Low = BlendedValues[Blendable]
+				end
+				if Low == nil then
+					Low = Blendable.Default
+				end
+				BlendedValues[Blendable] = Blend(CB, Low)
+				WasExclusiveHi_ByBlendable[Blendable] = nil
+				NewExclusiveHi_ByBlendable[Blendable] = if Blendable.ExclusiveHi then true else false
+			end
 		end
 		for Blendable, ExclusiveHi in WasExclusiveHi_ByBlendable do
 			if CB.ExclusiveLo or ExclusiveHi then
