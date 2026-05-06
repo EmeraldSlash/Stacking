@@ -7,6 +7,8 @@ Installation is done at runtime. All you need to do is require the module, and c
 
 Installing it on forked player scripts is recommended for stability, but you can use it on the latest dynamically updated PlayerModule if you really want to.
 
+Currently there is one limitation: Changes that occur without affecting the next frame's Camera.CFrame can't be applied. So there might be feedback problems if trying to do something like camera shake. I'm currently figuring out how to handle that scenario.
+
 Here is some example code (last updated for version 2):
 ```luau
 -- Installation at runtime.
