@@ -57,15 +57,20 @@ if CameraStacker then
     -- Custom blends let us apply changes to blendables relative to lower priority
     -- blocks.
     Blends = {
-      [CameraStacker.B_CFrame] = function(CameraBlock, ValueLo)
+      [CameraStacker.B_CFrame] = function(CameraBlock, ValueLow)
 
         -- ValueLo for B_CFrame and B_Focus should be guaranteed, but may not be
         -- the case with other blendables if none have been set yet.
-        assert(ValueLo)
+        assert(ValueLow)
+
+        -- All valid approaches. But for the first one, it might be confusing
+        -- for you if you start mixing "absolute" and "relative" blendable values!
+        --local ShakeOirection = CameraBlock.Blendables[CameraStacker.B_CFrame]
+        --local ShakeDirection = CameraBlock.CustomShakeDirectionField
+        local ShakeDirection = CFrame.new(1, 1, 1)
 
         -- Apply some translational camera shake.
-        -- (Also note: to access this blendables own value, you'd 
-        return ValueLo * (CFrame.new(1, 1, 1)*CameraBlock.Strength)
+        return ValueLow * (ShakeDirection*CameraBlock.Strength)
       end
     };
   })
