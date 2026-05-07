@@ -2,7 +2,7 @@
 
 -- Camera Stacker
 -- Created by @EmeraldSlash
--- Version: 2 (2026-05-07)
+-- Version: 4 (2026-05-07)
 
 -- Sets whether microprofiler labels are turned on or not.
 local PRF_ON = true
@@ -138,6 +138,7 @@ type CameraBlockTweenInfo = {
 	EasingDirection: Enum.EasingDirection?;
 	EasingFunction: ((number, Enum.EasingStyle?, Enum.EasingDirection?)->(number))?;
 	DisableInput: boolean?; -- Only when not transitioning, or as a fallback when transitioning.
+	AffectRenderingOnly: boolean?;
 
 	-- To disable a transition before or after, you can set its duration to 0. So
 	-- to disable the activation transition (instant snap), you can set
@@ -154,6 +155,8 @@ type CameraBlockTweenInfo = {
 	EasingFunctionOut: ((number, Enum.EasingStyle?, Enum.EasingDirection?)->(number))?;
 	DisableInputIn: boolean?; -- Only when transitioning in.
 	DisableInputOut: boolean?; -- Only when transitioning out.
+	AffectRenderingOnlyIn: boolean?;
+	AffectRenderingOnlyOut: boolean?;
 
 	-- You can set this to prevent the tween from blocking deactivation. (So
 	-- instead of tweening out it will just exit immediately.)
@@ -172,6 +175,33 @@ type CameraBlockTweenInfo = {
 do
 	local TweenService = game:GetService("TweenService")
 	local TweenService_GetValue = TweenService.GetValue
+
+	local function TIQueryBoolean(TI, RawProgress, Normal, In, Out): boolean?
+		local Result
+		if Normal ~= nil or
+			In ~= nil or
+			Out ~= nil
+		then
+			Result =
+				-- If we're transitioning out.
+				if TI.Target == 0 then (
+					if Out ~= nil then Out
+					elseif Normal ~= nil then Normal
+					else In)
+				-- If we're transitioning in.
+				elseif RawProgress < 1 then (
+					if In ~= nil then In
+					elseif Normal ~= nil then Normal
+					else Out)
+				-- If we're not transitioning.
+				else (
+					if Normal ~= nil then Normal
+					elseif In ~= nil then In
+					else Out)
+		end
+		return Result
+	end
+
 	function CameraStacker.E_Tween(CB: CameraBlock, DeltaTime: number)
 		local Finished = false
 		local TI: CameraBlockTweenInfo = (CB :: any).TweenInfo
@@ -206,27 +236,18 @@ do
 		end
 		TI.Value = math.lerp(TI.Start :: number, TI.Target :: number, Progress)
 		CB.Strength = TI.Value
-		if TI.DisableInputIn ~= nil or
-			TI.DisableInputOut ~= nil or
-			TI.DisableInput ~= nil
-		then
-			CB.DisableInput =
-				-- If we're transitioning out.
-				if TI.Target == 0 then (
-					if TI.DisableInputOut ~= nil then TI.DisableInputOut
-					elseif TI.DisableInput ~= nil then TI.DisableInput
-					else TI.DisableInputIn)
-				-- If we're transitioning in.
-				elseif RawProgress < 1 then (
-					if TI.DisableInputIn ~= nil then TI.DisableInputIn
-					elseif TI.DisableInput ~= nil then TI.DisableInput
-					else TI.DisableInputOut)
-				-- If we're not transitioning.
-				else (
-					if TI.DisableInput ~= nil then TI.DisableInput
-					elseif TI.DisableInputIn ~= nil then TI.DisableInputIn
-					else TI.DisableInputOut)
+
+		local DisableInput = TIQueryBoolean(
+			TI, RawProgress, TI.DisableInput, TI.DisableInputIn, TI.DisableInputOut)
+		if DisableInput ~= nil then
+			CB.DisableInput = DisableInput :: any
 		end
+		local AffectRenderingOnly = TIQueryBoolean(
+			TI, RawProgress, TI.AffectRenderingOnly, TI.AffectRenderingOnlyIn, TI.AffectRenderingOnlyOut)
+		if AffectRenderingOnly ~= nil then
+			CB.AffectRenderingOnly = AffectRenderingOnly :: any
+		end
+
 		if not CB.Active then
 			if CB.Destroyed and TI.CancelOnDestroy then
 				TI.Cancelled = true
@@ -246,6 +267,9 @@ export type CameraBlockBase = {
 	-- Optional, can be used to store & look up the CameraBlock using some unique
 	-- name. If provided, it will be registered under this Id.
 	Id: any?;
+
+	-- Store random stuff in here.
+	UserData: {[any]: any};
 
 	-- Higher values will evaluate last and will replace lower values. If a given
 	-- priority number is not set, it will default to 0. Allows indefinite
@@ -323,6 +347,24 @@ export type CameraBlockBase = {
 	-- Defines whether the camera occlusion module should be disabled or not.
 	-- (Final per-frame result is the union of all camera blocks.)
 	DisableOcclusion: boolean?;
+	-- If true, the camera CFrame & focus output of this block will be applied to
+	-- the camera after setting Camera.CFrame, and the original Camera.CFrame
+	-- will be restored before the camera updates again. Useful for temporary
+	-- effects layered on top of whatever camera is active and for which you wish
+	-- to avoid feedback, e.g. screen shake.
+	--
+	-- This still respects the stacking behavior, and if a higher priority block
+	-- takes over with AffectRenderingOnly=false, it will be replaced by the
+	-- higher block (it won't be layered on top), and the higher block may
+	-- upgrade the "rendering only" CFrame to a "full CFrame" so that the higher
+	-- blocker can blend with it.
+	--
+	-- Code that wishes to query the values of CFrame/focus last frame will get
+	-- the "full CFrame" by default if it uses .B_CFrame, so if it wants to query
+	-- the "rendering only CFrame" then it can read .B_CFrameOverride first then
+	-- fall back to .B_CFrame if it fails.
+	--
+	AffectRenderingOnly: boolean?;
 }
 export type CameraBlock = CameraBlockBase & {
 	-- Set to true when should be in use. The CameraBlock may still be evaluation
@@ -373,9 +415,15 @@ do
 			end
 			CameraStacker.CB_ById[CB.Id] = CB
 		end
-		CB.Priority = CB.Priority or {}
+		-- Should we validate all fields here? For better UX.
+		if type(CB.Priority) == "number" then
+			CB.Priority = {CB.Priority}
+		elseif type(CB.Priority) ~= "table" then
+			CB.Priority = {}
+		end
 		CB.Blendables = CB.Blendables or {}
 		CB.Blends = CB.Blends or {}
+		CB.UserData = CB.UserData or {}
 		CB.Traceback = debug.traceback(nil, 2)
 		setmetatable(CB, MetaCB)
 		return CB
@@ -439,6 +487,9 @@ end
 -- correctly include/exclude certain influences when choosing the values to
 -- start from.
 function CameraStacker.QueryBlendValuesLastFrameForPriority(Priority: {number}, IncludeSelf: boolean?): {[Blendable<any>]: any}
+	if type(Priority) == "number" then
+		Priority = {Priority}
+	end
 	local HighestPriority = nil
 	local HighestBlendValues = CameraStacker.BlendValuesLastFrame_Base
 	for PriorityString, BlendValues in CameraStacker.BlendValuesLastFrame_ByPriorityString do
@@ -551,88 +602,127 @@ local function CameraStackerEvaluate(DeltaTime)
 	return DisableInput, DisableOcclusion
 end
 
+CameraStacker.B_CFrameOverride = Def<< Blendable<CFrame> >>({})
+CameraStacker.B_FocusOverride = Def<< Blendable<CFrame> >>({})
 local V3_Lerp = Vector3.zero.Lerp
 local CF_Lerp = CFrame.identity.Lerp
 local function CameraStackerBlend(
 	InputCFrame: CFrame,
 	InputFocus: CFrame,
 	CameraModule
-): (CFrame, CFrame)
+): (CFrame, CFrame, CFrame?, CFrame?)
 	if PRF_ON then debug.profilebegin("CameraStackerBlend") end
 
 	CameraStacker.B_CFrame.Default = InputCFrame
 	CameraStacker.B_Focus.Default = InputFocus
 
+	-- We support overrides for
+	CameraStacker.B_CFrameOverride.Default = InputCFrame
+	CameraStacker.B_FocusOverride.Default = InputCFrame
+
 	local BlendedValues = {}
 	local BlendedValues_ByPriorityString = {}
 	local WasExclusiveHi_ByBlendable: {[Blendable<any>]: boolean} = {}
+
+	local function UpdateBlendable(CB: CameraBlock, NewExclusiveHi_ByBlendable, Blendable)
+		local CanUseLow =
+			(not CB.ExclusiveLo) and
+			(not Blendable.ExclusiveLo) and
+			(not WasExclusiveHi_ByBlendable[Blendable])
+
+		local BlendableOverride
+		if Blendable == CameraStacker.B_CFrame then
+			BlendableOverride = CameraStacker.B_CFrameOverride
+		elseif Blendable == CameraStacker.B_Focus then
+			BlendableOverride = CameraStacker.B_FocusOverride
+		end
+
+		local BlendableKey = Blendable
+		if BlendableOverride then
+			if CB.AffectRenderingOnly then
+				BlendableKey = BlendableOverride
+				local Existing = BlendedValues[BlendableOverride]
+				BlendedValues[BlendableOverride] =
+					if Existing ~= nil then Existing else BlendedValues[Blendable]
+			else
+				-- Here we enable smooth transitions between low priority "rendering
+				-- only" / "override" blendables and high priority "full"
+				-- blendables by upgrading the rendering only blendable to a full
+				-- blendable.
+				local LowRender = BlendedValues[BlendableOverride]
+				if LowRender ~= nil then
+					BlendedValues[Blendable] = LowRender
+				end
+			end
+		end
+
+		local Low = nil
+		if CanUseLow then
+			Low = BlendedValues[BlendableKey]
+		end
+		if Low == nil then
+			Low = Blendable.Default
+		end
+		local NewValue
+		local Blend = CB.Blends[Blendable]
+		if Blend then
+			NewValue = Blend(CB, Low)
+		else
+			local High = CB.Blendables[Blendable]
+			assert(High ~= nil)
+			local Strength = math.clamp(CB.Strength or 1, 0, 1)
+			if Strength <= 0 then
+				NewValue = Low
+			elseif not Low then
+				NewValue = High
+			elseif Blendable.Blend then
+				NewValue = Blendable.Blend(Low, High, Strength)
+			else
+				local TypeT = typeof(High)
+				local TypeB = typeof(Low)
+				if TypeT ~= TypeB then
+					NewValue = High
+				elseif TypeT == "number" then
+					NewValue = math.lerp(Low, High, Strength)
+				elseif TypeT == "Vector3" then
+					NewValue = V3_Lerp(Low, High, Strength)
+				elseif TypeT == "CFrame" then
+					NewValue = CF_Lerp(Low,  High, Strength)
+				else
+					NewValue = High
+				end
+			end
+		end
+		BlendedValues[BlendableKey] = NewValue
+		WasExclusiveHi_ByBlendable[Blendable] = nil
+		NewExclusiveHi_ByBlendable[Blendable] = if Blendable.ExclusiveHi then true else false
+	end
 
 	for Index = #CameraStacker.CBs_Active, 1, -1 do
 		local CB = CameraStacker.CBs_Active[Index]
 		local NewExclusiveHi_ByBlendable: {[Blendable<any>]: boolean} = {}
 
-		local Key = if CB.Priority[1] then table.concat(CB.Priority) else "0"
 		for Blendable, High in CB.Blendables do
-			local Low = nil
-			if (not CB.ExclusiveLo) and
-				(not Blendable.ExclusiveLo) and
-				(not WasExclusiveHi_ByBlendable[Blendable])
-			then
-				Low = BlendedValues[Blendable]
-			end
-			if Low == nil then
-				Low = Blendable.Default
-			end
-			local Blend = CB.Blends[Blendable]
-			if Blend then
-				BlendedValues[Blendable] = Blend(CB, Low)
-			else
-				local Strength = math.clamp(CB.Strength or 1, 0, 1)
-				if Strength <= 0 then
-					BlendedValues[Blendable] = Low
-				elseif not Low then
-					BlendedValues[Blendable] = High
-				elseif Blendable.Blend then
-					BlendedValues[Blendable] = Blendable.Blend(Low, High, Strength)
-				else
-					local TypeT = typeof(High)
-					local TypeB = typeof(Low)
-					if TypeT ~= TypeB then
-						BlendedValues[Blendable] = High
-					elseif TypeT == "number" then
-						BlendedValues[Blendable] = math.lerp(Low, High, Strength)
-					elseif TypeT == "Vector3" then
-						BlendedValues[Blendable] = V3_Lerp(Low, High, Strength)
-					elseif TypeT == "CFrame" then
-						BlendedValues[Blendable] = CF_Lerp(Low,  High, Strength)
-					else
-						BlendedValues[Blendable] = High
-					end
-				end
-			end
-			WasExclusiveHi_ByBlendable[Blendable] = nil
-			NewExclusiveHi_ByBlendable[Blendable] = if Blendable.ExclusiveHi then true else false
+			UpdateBlendable(CB, NewExclusiveHi_ByBlendable, Blendable)
 		end
-		for Blendable, Blend in CB.Blends do
+		for Blendable in CB.Blends do
 			if not CB.Blendables[Blendable] then
-				local Low = nil
-				if (not CB.ExclusiveLo) and
-					(not Blendable.ExclusiveLo) and
-					(not WasExclusiveHi_ByBlendable[Blendable])
-				then
-					Low = BlendedValues[Blendable]
-				end
-				if Low == nil then
-					Low = Blendable.Default
-				end
-				BlendedValues[Blendable] = Blend(CB, Low)
-				WasExclusiveHi_ByBlendable[Blendable] = nil
-				NewExclusiveHi_ByBlendable[Blendable] = if Blendable.ExclusiveHi then true else false
+				UpdateBlendable(CB, NewExclusiveHi_ByBlendable, Blendable)
 			end
 		end
-		for Blendable, ExclusiveHi in WasExclusiveHi_ByBlendable do
-			if CB.ExclusiveLo or ExclusiveHi then
+		for Blendable, WasExclusiveHi in WasExclusiveHi_ByBlendable do
+			local CanUseLow =
+				(not CB.ExclusiveLo) and
+				(not Blendable.ExclusiveLo) and
+				(not WasExclusiveHi)
+
+			if not CanUseLow then
 				BlendedValues[Blendable] = nil
+				if Blendable == CameraStacker.B_CFrame then
+					BlendedValues[CameraStacker.B_CFrameOverride] = nil
+				elseif Blendable == CameraStacker.B_Focus then
+					BlendedValues[CameraStacker.B_FocusOverride] = nil
+				end
 			end
 		end
 		WasExclusiveHi_ByBlendable = NewExclusiveHi_ByBlendable
@@ -652,11 +742,6 @@ local function CameraStackerBlend(
 		local PriorityString = table.concat(Normalized, ",")
 		BlendedValues_ByPriorityString[PriorityString] = table.clone(BlendedValues)
 	end
-
-	local ResultCFrame =
-		BlendedValues[CameraStacker.B_CFrame] or CameraStacker.B_CFrame.Default
-	local ResultFocus =
-		BlendedValues[CameraStacker.B_Focus] or CameraStacker.B_Focus.Default
 
 	local Visited = {}
 	for Blendable, Value in BlendedValues do
@@ -680,52 +765,77 @@ local function CameraStackerBlend(
 	}
 
 	if PRF_ON then debug.profileend() end
-	return ResultCFrame, ResultFocus
+
+	return
+		BlendedValues[CameraStacker.B_CFrame] or CameraStacker.B_CFrame.Default,
+		BlendedValues[CameraStacker.B_Focus] or CameraStacker.B_Focus.Default,
+		BlendedValues[CameraStacker.B_CFrameOverride],
+		BlendedValues[CameraStacker.B_FocusOverride]
 end
+
+CameraStacker.PreStackCameraCFrame = CFrame.identity
+CameraStacker.PreStackCameraFocus = CFrame.identity
+
+CameraStacker.PreOcclusionCameraCFrame = CFrame.identity
+CameraStacker.PreOcclusionCameraFocus = CFrame.identity
+
+CameraStacker.PostUpdateCameraCFrame = CFrame.identity
+CameraStacker.PostUpdateCameraFocus = CFrame.identity
+
+CameraStacker.PostOverrideCameraCFrame = CFrame.identity
+CameraStacker.PostOverrideCameraFocus = CFrame.identity
+
+CameraStacker.DidApplyRenderingOverride = false
 
 return function(PlayerModule: ModuleScript)
 
 	local CameraModule = require(PlayerModule:WaitForChild("CameraModule")) :: any
 	local CameraInput = require(PlayerModule:WaitForChild("CameraModule"):WaitForChild("CameraInput")) :: any
-	
+
 	-- Provides the API and stores state.
 	CameraModule.CameraStacker = CameraStacker
-	
+
 	CameraModule._UpdateOriginal = CameraModule.Update
 	function CameraModule.Update(self, DeltaTime)
 		if self.activeCameraController then
-			
+			local CurrentCamera = game.Workspace.CurrentCamera :: Camera
+
+			if CameraStacker.DidApplyRenderingOverride then
+				CameraStacker.DidApplyRenderingOverride = false
+				CurrentCamera.CFrame = CameraStacker.PostUpdateCameraCFrame
+				CurrentCamera.Focus = CameraStacker.PostUpdateCameraFocus
+			end
+
 			local InputDisabled, AllowOcclusion = CameraStackerEvaluate(DeltaTime)
 			CameraInput.setInputEnabled(not InputDisabled)
 			self.activeCameraController:UpdateMouseBehavior()
-			
+
 			local NewCameraCFrame, NewCameraFocus =
 				self.activeCameraController:Update(DeltaTime)
-			
+
 			-- Properties before camera stacker.
-			self.PreStackCameraCFrame = NewCameraCFrame
-			self.PreStackCameraFocus = NewCameraFocus
-			
-			local BlendedCFrame, BlendedFocus =
+			CameraStacker.PreStackCameraCFrame = NewCameraCFrame
+			CameraStacker.PreStackCameraFocus = NewCameraFocus
+
+			local BlendedCFrame, BlendedFocus, BlendedCFrameOverride, BlendedFocusOverride =
 				CameraStackerBlend(NewCameraCFrame, NewCameraFocus, CameraModule)
-			
+
 			NewCameraCFrame = BlendedCFrame
 			NewCameraFocus = BlendedFocus
 
 			-- Properties before occlusion module.
-			self.PreOcclusionCameraCFrame = NewCameraCFrame
-			self.PreOcclusionCameraFocus = NewCameraFocus
+			CameraStacker.PreOcclusionCameraCFrame = NewCameraCFrame
+			CameraStacker.PreOcclusionCameraFocus = NewCameraFocus
 
 			if self.activeOcclusionModule and AllowOcclusion then
 				NewCameraCFrame, NewCameraFocus = self.activeOcclusionModule:Update(
 					DeltaTime, NewCameraCFrame, NewCameraFocus)
 			end
-			
-			-- Final properties.
-			self.FinalCameraCFrame = NewCameraCFrame
-			self.FinalCameraFocus = NewCameraFocus
 
-			local CurrentCamera = game.Workspace.CurrentCamera :: Camera
+			-- Final properties.
+			CameraStacker.PostUpdateCameraCFrame = NewCameraCFrame
+			CameraStacker.PostUpdateCameraFocus = NewCameraFocus
+
 			CurrentCamera.CFrame = NewCameraCFrame
 			CurrentCamera.Focus = NewCameraFocus
 
@@ -735,6 +845,15 @@ return function(PlayerModule: ModuleScript)
 
 			if CameraInput.getInputEnabled() then
 				CameraInput.resetInputForFrameEnd()
+			end
+
+			if BlendedCFrameOverride then
+				CurrentCamera.CFrame = BlendedCFrameOverride
+				CameraStacker.DidApplyRenderingOverride = true
+			end
+			if BlendedFocusOverride then
+				CurrentCamera.Focus = BlendedFocusOverride
+				CameraStacker.DidApplyRenderingOverride = true
 			end
 		end
 	end
