@@ -7,7 +7,7 @@ Installation is done at runtime. All you need to do is require the module, and c
 
 Installing it on forked player scripts is recommended for stability, but you can use it on the latest dynamically updated PlayerModule if you really want to.
 
-Here is some example code (last updated for version 2):
+Here is some example code (last updated for version 4):
 ```luau
 -- Installation at runtime.
 local PlayerModule = game.Players.LocalPlayer:WaitForChild("PlayerScripts"):WaitForChild("PlayerModule")
