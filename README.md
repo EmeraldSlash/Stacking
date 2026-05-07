@@ -90,7 +90,7 @@ if CameraStacker then
   CameraBlock_Shake:SetActive(false)
 
   -- Let's create another camera block that runs a smooth transition tween instead.
-  local CameraBlock_Shopkeeper = CameraStacker.CameraBlocknew({
+  local CameraBlock_Shopkeeper = CameraStacker.CameraBlockNew({
     Id = "Shopkeeper";
     Priority = {CameraStacker.P_UI};
     Blendables = {
