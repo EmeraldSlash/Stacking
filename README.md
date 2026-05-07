@@ -52,6 +52,10 @@ if CameraStacker then
     Eval = function(CameraBlock, DeltaTime)
       -- Let's only apply this block at strength based on math.sin() of current time.
       CameraBlock.Strength = (math.sin(tick()) + 1) / 2
+
+      -- You can ignore this, it is relevant to Blends's B_CFrame function below.
+      --CameraBlock.Blendables[CameraStacker.B_CFrame] = CFrame.new(1, 1, 1)
+      --CameraBlock.UserData.ShakeDirection = CFrame.new(1, 1, 1)
       
       -- Indicate when the block is done.
       local IsFinished = not CameraBlock.Active
@@ -70,7 +74,7 @@ if CameraStacker then
         -- All valid approaches. But for the first one, it might be confusing
         -- for you if you start mixing "absolute" and "relative" blendable values!
         --local ShakeOirection = CameraBlock.Blendables[CameraStacker.B_CFrame]
-        --local ShakeDirection = CameraBlock.CustomShakeDirectionField
+        --local ShakeDirection = CameraBlock.UserData.ShakeDirection
         local ShakeDirection = CFrame.new(1, 1, 1)
 
         -- Apply some translational camera shake.
