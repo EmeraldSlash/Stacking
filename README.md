@@ -26,7 +26,9 @@ if CameraStacker then
   local B_Blur: CameraStacker.Blendable<number> = {
     Default = 0;
     Apply = function(Value)
-      BlurEffect.Size = Value
+      -- Value may be nil if the blendable is being unset because it was
+      -- used last frame and not used this frame.
+      BlurEffect.Size = Value or 0
     end;
   }
 
