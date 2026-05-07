@@ -102,7 +102,8 @@ if CameraStacker then
     DisableInput = true;
     DisableInputOut = false; -- Allow player to move camera while transitioning out.
     AffectRenderingOnly = false;
-    AffectRenderingOnlyOut = true; -- Prevent feedback when transitioning out.
+    AffectRenderingOnlyIn = true; -- Prevent feedback when transitioning.
+    AffectRenderingOnlyOut = true; -- Prevent feedback when transitioning.
   })
   ShopkeeperHitboxEntered:Connect(function()
     CameraBlock_Shopkeeper:SetActive(true)
