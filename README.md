@@ -93,8 +93,8 @@ if CameraStacker then
       [CameraStacker.B_CFrame] = ShopkeeperCameraPart.CFrame;
       [CameraStacker.B_Focus] = ShopkeeperFocusPart.CFrame;
     };
-    -- Instead of defining an Eval function above, we instead use a helper
-    -- to quickly produce the logic for an in/out transitioning tween.
+  -- Instead of defining an Eval function above, we use a helper to
+  -- quickly produce the logic for an in/out transitioning tween.
   )}:SetEval_Tween({
     Duration = 0.5;
     EasingStyle = Enum.EasingStyle.Exponetial;
