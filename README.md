@@ -7,8 +7,6 @@ Installation is done at runtime. All you need to do is require the module, and c
 
 Installing it on forked player scripts is recommended for stability, but you can use it on the latest dynamically updated PlayerModule if you really want to.
 
-Currently there is one limitation: There is no way to have changes that occur without affecting the next frame's Camera.CFrame. So there might be feedback problems if trying to do something like camera shake. I'm currently figuring out how to handle that scenario.
-
 Here is some example code (last updated for version 2):
 ```luau
 -- Installation at runtime.
@@ -45,6 +43,10 @@ if CameraStacker then
     Blendables = {
       [B_Blur] = 24;
     };
+
+    -- Prevent feedback by making the camera CFrame/focus changes invisible
+    -- to the next frame.
+    AffectRenderingOnly = true;
 
     -- The main behavioural controller of this block, gets executed every frame.
     Eval = function(CameraBlock, DeltaTime)
