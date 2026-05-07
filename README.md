@@ -101,6 +101,8 @@ if CameraStacker then
     EasingDirection = Enum.EasingDirection.Out;
     DisableInput = true;
     DisableInputOut = false; -- Allow player to move camera while transitioning out.
+    AffectRenderingOnly = false;
+    AffectRenderingOnlyOut = true; -- Prevent feedback when transitioning out.
   })
   ShopkeeperHitboxEntered:Connect(function()
     CameraBlock_Shopkeeper:SetActive(true)
