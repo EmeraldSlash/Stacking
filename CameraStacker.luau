@@ -1,11 +1,67 @@
 --!strict
 
 -- Camera Stacker
--- Created by @EmeraldSlash
--- Version: 4 (2026-05-07)
+--
+-- https://github.com/EmeraldSlash/CameraStacker
+--
+-- Created by Rio Manson-Hay (@EmeraldSlash)
+--
+-- Version: 5 (2026-05-14)
 
 -- Sets whether microprofiler labels are turned on or not.
 local PRF_ON = true
+
+--------------------------------------------------------------------------------
+--
+-- API Summary:
+--
+--                (this module returns a function that patches the PlayerModule)
+-- return: (PlayerModuleInstance)->()
+--                     (the CameraStacker module gets patched into CameraModule)
+-- CameraModule.CameraStacker = .
+--
+-- type Blendable              (defines a value that can be stacked and blended)
+-- .P_***: number                                            (preset priorities)
+-- .B_***: Blendable                                         (preset blendables)
+-- .E_***: (CameraBlock, DeltaTime)->(boolean)               (preset evaluators)
+--
+-- type CameraBlockBase               (initalization table for the camera block)
+-- .CameraBlockNew(CameraBlockBase)->CameraBlock
+--
+-- type CameraBlock (AKA CB)      (contains blendables, gets put into the stack)
+-- CB:SetActive(IsActive)->CameraBlock
+-- CB:Destroy()
+-- CB.B_***: Blendable                                       (preset blendables)
+-- CB.E_***: (CameraBlock, DeltaTime)->(boolean)             (preset evaluators)
+-- type CameraBlockTweenInfo                          (storage & params E_Tween)
+-- CB:SetEval_Tween(CameraBlockTweenInfo)->CameraBlock    (setup helper E_Tween)
+--
+--
+-- .CB_ById: {[any]: CameraBlock}                            (optional registry)
+-- .CBs_Active: {CameraBlock}                                        (the stack)
+--
+--                                                            (helper functions)
+-- .PriorityALowerThanB(APriority, BPriority)->boolean
+-- .QueryBlendValuesLastFrameForPriority(Priority, IncludeSelf)->{[Blendable]: any}
+-- .Blend(LowPriorityValue, HighPriorityValue, Strength, Blendable)->(BlendedValue)
+
+--                                   (reference specific values from last frame)
+-- .BlendValuesLastFrame: {[Blendable]: any}
+-- .BlendValuesLastFrame_ByPriorityString: {[string]: {[Blendable]: any}}
+-- .BlendValuesLastFrame_Base: {[Blendable]: any}
+--
+--                             (reference camera cframe & focus from last frame)
+-- .PreStackCameraCFrame: CFrame
+-- .PreStackCameraFocus: CFrame
+-- .PreOcclusionCameraCFrame: CFrame
+-- .PreOcclusionCameraFocus: CFrame
+-- .PostUpdateCameraCFrame: CFrame
+-- .PostUpdateCameraFocus: CFrame
+-- .PostOverrideCameraCFrame: CFrame
+-- .PostOverrideCameraFocus: CFrame
+-- .DidApplyRenderingOverride: boolean
+--
+--------------------------------------------------------------------------------
 
 local CameraStacker = {}
 
@@ -87,6 +143,12 @@ local function Def<T>(Value: T): T return Value end
 -- values every frame before blending.
 CameraStacker.B_CFrame = Def<< Blendable<CFrame> >>({})
 CameraStacker.B_Focus = Def<< Blendable<CFrame> >>({})
+
+-- These are used internally for CFrames that affect rendering only and avoid
+-- creating feedback with the primary camera CFrame. You should only need to
+-- reference these if you need to query those rendering-only CFrames.
+CameraStacker.B_CFrameOverride = Def<< Blendable<CFrame> >>({})
+CameraStacker.B_FocusOverride = Def<< Blendable<CFrame> >>({})
 
 -- These are examples of custom blendables you can create. And you can also just
 -- use these directly.
@@ -183,18 +245,18 @@ do
 			Out ~= nil
 		then
 			Result =
-				-- If we're transitioning out.
 				if TI.Target == 0 then (
+					-- ^ If we're transitioning out.
 					if Out ~= nil then Out
 					elseif Normal ~= nil then Normal
 					else In)
-				-- If we're transitioning in.
 				elseif RawProgress < 1 then (
+					-- ^ If we're transitioning in.
 					if In ~= nil then In
 					elseif Normal ~= nil then Normal
 					else Out)
-				-- If we're not transitioning.
 				else (
+					-- ^ If we're not transitioning.
 					if Normal ~= nil then Normal
 					elseif In ~= nil then In
 					else Out)
@@ -279,6 +341,17 @@ export type CameraBlockBase = {
 	--
 	Priority: {number};
 
+	-- @CameraStackerTODO: A big issue in the API rn is that's kinda dumb... It's
+	-- confusing (and the implementation is a little bit inefficient) to have
+	-- both Blendables and Blenders, even though the ergonomics are alright. And
+	-- also it would just be really nice to have a single Blender function that
+	-- can do all the blending for a whole CameraBlock - but this would need a
+	-- granular "get previous value" and "write previous value" API which is not
+	-- great. Something I could do, though, is have clearly separate Blenders and
+	-- Values fields in the CameraBlock, and make the Blenders the canonical
+	-- field for whether something gets applied or not. But this would make
+	-- ergonomics worse... so it's not a great solution.
+
 	-- Built-in and user-defined blendable values, such as camera cframe, focus,
 	-- field of view.
 	--
@@ -311,7 +384,7 @@ export type CameraBlockBase = {
 	-- alternatives may make more sense organizationally in many secnarios as
 	-- they avoid mixing "absolute" and "relative" values.
 	--
-	Blends: {[Blendable<any>]: (CB: CameraBlock, ValueLow: any?)->(any?)};
+	Blenders: {[Blendable<any>]: (CB: CameraBlock, ValueLow: any?)->(any?)};
 
 	-- These two fields behave the same as the corresponding Blendable fields,
 	-- but will force their behavior for all Blendables consumed or produced by
@@ -327,7 +400,7 @@ export type CameraBlockBase = {
 	-- deactivated and/or no longer needs to run updates every frame), or false
 	-- if it should continue running in future frames. If this function is not
 	-- set, the CB will be done immediately if CB.Active == false. This function
-	-- can also be used to arbitrarily modify the Blendables, Blends,
+	-- can also be used to arbitrarily modify the Blendables, Blenders,
 	-- ExclusiveLo, and ExclusiveHi fields. But DO NOT MODIFY the Priority field.
 	Eval: ((CB: CameraBlock, DeltaTime: number)->(boolean))?;
 
@@ -379,9 +452,11 @@ export type CameraBlock = CameraBlockBase & {
 	-- Debug info.
 	Traceback: string;
 
-	-- Commonly used values.
+	-- Commonly used constant values that are also stored inside CameraStacker.
 	B_CFrame: Blendable<CFrame>;
 	B_Focus: Blendable<CFrame>;
+	B_CFrameOverride: Blendable<CFrame>;
+	B_FocusOverride: Blendable<CFrame>;
 	E_Tween: (CB: CameraBlock, DeltaTime: number)->(boolean);
 
 	-- Setup E_Tween on this CameraBlock
@@ -422,7 +497,7 @@ do
 			CB.Priority = {}
 		end
 		CB.Blendables = CB.Blendables or {}
-		CB.Blends = CB.Blends or {}
+		CB.Blenders = CB.Blenders or {}
 		CB.UserData = CB.UserData or {}
 		CB.Traceback = debug.traceback(nil, 2)
 		setmetatable(CB, MetaCB)
@@ -431,6 +506,8 @@ do
 
 	MetaCB.B_CFrame = CameraStacker.B_CFrame
 	MetaCB.B_Focus = CameraStacker.B_Focus
+	MetaCB.B_CFrameOverride = CameraStacker.B_CFrameOverride
+	MetaCB.B_FocusOverride = CameraStacker.B_FocusOverride
 	MetaCB.E_Tween = CameraStacker.E_Tween
 	function MetaCB.SetEval_Tween(CB: CameraBlock, CBTweenInfo: CameraBlockTweenInfo): CameraBlock
 		CB.Eval = CB.E_Tween
@@ -602,10 +679,35 @@ local function CameraStackerEvaluate(DeltaTime)
 	return DisableInput, DisableOcclusion
 end
 
-CameraStacker.B_CFrameOverride = Def<< Blendable<CFrame> >>({})
-CameraStacker.B_FocusOverride = Def<< Blendable<CFrame> >>({})
 local V3_Lerp = Vector3.zero.Lerp
 local CF_Lerp = CFrame.identity.Lerp
+function CameraStacker.Blend(Low: any, High: any, Strength: number?, Blendable: Blendable<any>): any
+	local NewValue
+	local Strength = math.clamp(Strength or 1, 0, 1)
+	if Strength <= 0 then
+		NewValue = Low
+	elseif not Low then
+		NewValue = High
+	elseif Blendable.Blend then
+		NewValue = Blendable.Blend(Low, High, Strength)
+	else
+		local TypeT = typeof(High)
+		local TypeB = typeof(Low)
+		if TypeT ~= TypeB then
+			NewValue = High
+		elseif TypeT == "number" then
+			NewValue = math.lerp(Low, High, Strength)
+		elseif TypeT == "Vector3" then
+			NewValue = V3_Lerp(Low, High, Strength)
+		elseif TypeT == "CFrame" then
+			NewValue = CF_Lerp(Low,  High, Strength)
+		else
+			NewValue = High
+		end
+	end
+	return NewValue
+end
+
 local function CameraStackerBlend(
 	InputCFrame: CFrame,
 	InputFocus: CFrame,
@@ -616,7 +718,10 @@ local function CameraStackerBlend(
 	CameraStacker.B_CFrame.Default = InputCFrame
 	CameraStacker.B_Focus.Default = InputFocus
 
-	-- We support overrides for
+	-- The overrides must also be initialized to default values. We need to do
+	-- this because even though the overrides' default values will never be read
+	-- in this function, usage code may try to read them from
+	-- BlendValuesLastFrame_* tables, or in other arbitrary situations.
 	CameraStacker.B_CFrameOverride.Default = InputCFrame
 	CameraStacker.B_FocusOverride.Default = InputCFrame
 
@@ -664,34 +769,13 @@ local function CameraStackerBlend(
 			Low = Blendable.Default
 		end
 		local NewValue
-		local Blend = CB.Blends[Blendable]
-		if Blend then
-			NewValue = Blend(CB, Low)
+		local Blender = CB.Blenders[Blendable]
+		if Blender then
+			NewValue = Blender(CB, Low)
 		else
 			local High = CB.Blendables[Blendable]
 			assert(High ~= nil)
-			local Strength = math.clamp(CB.Strength or 1, 0, 1)
-			if Strength <= 0 then
-				NewValue = Low
-			elseif not Low then
-				NewValue = High
-			elseif Blendable.Blend then
-				NewValue = Blendable.Blend(Low, High, Strength)
-			else
-				local TypeT = typeof(High)
-				local TypeB = typeof(Low)
-				if TypeT ~= TypeB then
-					NewValue = High
-				elseif TypeT == "number" then
-					NewValue = math.lerp(Low, High, Strength)
-				elseif TypeT == "Vector3" then
-					NewValue = V3_Lerp(Low, High, Strength)
-				elseif TypeT == "CFrame" then
-					NewValue = CF_Lerp(Low,  High, Strength)
-				else
-					NewValue = High
-				end
-			end
+			NewValue = CameraStacker.Blend(Low, High, CB.Strength, Blendable)
 		end
 		BlendedValues[BlendableKey] = NewValue
 		WasExclusiveHi_ByBlendable[Blendable] = nil
@@ -705,7 +789,7 @@ local function CameraStackerBlend(
 		for Blendable, High in CB.Blendables do
 			UpdateBlendable(CB, NewExclusiveHi_ByBlendable, Blendable)
 		end
-		for Blendable in CB.Blends do
+		for Blendable in CB.Blenders do
 			if not CB.Blendables[Blendable] then
 				UpdateBlendable(CB, NewExclusiveHi_ByBlendable, Blendable)
 			end
@@ -786,6 +870,11 @@ CameraStacker.PostOverrideCameraCFrame = CFrame.identity
 CameraStacker.PostOverrideCameraFocus = CFrame.identity
 
 CameraStacker.DidApplyRenderingOverride = false
+
+-- @CameraStackerTODO: the CameraStacker can only be used on the
+-- PlayerModule/default camera itself, but really it is a more generic system
+-- that could be applied to any output, and the PlayerModule/camera part is just
+-- a specal use case, so maybe those two components should be separated.
 
 return function(PlayerModule: ModuleScript)
 
