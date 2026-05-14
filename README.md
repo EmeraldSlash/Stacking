@@ -43,7 +43,7 @@ if CameraStacker then
     Priority = {CameraStacker.P_GameplayJuice, 10, 2};
 
     -- Set the "non-relative" / "absolute" blendable values this block uses.
-    -- ("Relative" blendable values are handled by CustomBlends instead.)
+    -- ("Relative" blendable values are handled by Blenders instead.)
     Blendables = {
       [B_Blur] = 24;
     };
