@@ -9,7 +9,7 @@ Installing it on forked player scripts is recommended for stability, but you can
 
 Two things on the to-do list: First, the current system of Blendables and Blends is a bit confusing (the ergonomics are alright but implementation and user communication are tough) - as the solution, I'd like to have clearly separate Blend and Values fields, and make Blends the canonical thing for whether something gets applied or not, possibly. Second, the CameraStacker can only be used on the PlayerModule/default camera itself, but really it is a more generic system that could be applied to any output, and the PlayerModule/camera part is just a specal use case, so maybe those two components should be separated.
 
-Here is some example code (last updated for version 4):
+Here is some example code (last updated for version 5):
 ```luau
 -- Installation at runtime.
 local PlayerModule = game.Players.LocalPlayer:WaitForChild("PlayerScripts"):WaitForChild("PlayerModule")
@@ -66,9 +66,9 @@ if CameraStacker then
       return IsFinished
     end;
 
-    -- Custom blends let us apply changes to blendables relative to lower priority
-    -- blocks.
-    Blends = {
+    -- Custom blenders let us apply changes to blendables relative to lower
+    -- priority blocks.
+    Blenders = {
       [CameraStacker.B_CFrame] = function(CameraBlock, ValueLow)
 
         -- ValueLo for B_CFrame and B_Focus should be guaranteed, but may not be
