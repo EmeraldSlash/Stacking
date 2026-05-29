@@ -68,7 +68,7 @@ if CameraStacker then
       Ctx:Existing(B_Blur)
 
       -- Apply camera CFrame relative to the lower priority CFrame, in this case
--     -- some dumb translational camera shake.
+      -- some dumb translational camera shake.
       local LowCFrame = Ctx:Read(CameraStacker.B_CFrame)
       local ShakeDirection = CFrame.new(1, 1, 1)
       Ctx:Write(CameraStacker.B_CFrame, LowCFrame * (ShakeDirection * CameraBlock.Strength))
