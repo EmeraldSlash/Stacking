@@ -6,7 +6,7 @@
 --
 -- Created by Rio Manson-Hay (@EmeraldSlash)
 --
--- Version: 5 (2026-05-14)
+-- Version: 6 (2026-05-29)
 
 -- Sets whether microprofiler labels are turned on or not.
 local PRF_ON = true
@@ -40,15 +40,22 @@ local PRF_ON = true
 -- .CB_ById: {[any]: CameraBlock}                            (optional registry)
 -- .CBs_Active: {CameraBlock}                                        (the stack)
 --
---                                                            (helper functions)
+--                                                      (query helper functions)
 -- .PriorityALowerThanB(APriority, BPriority)->boolean
 -- .QueryBlendValuesLastFrameForPriority(Priority, IncludeSelf)->{[Blendable]: any}
--- .Blend(LowPriorityValue, HighPriorityValue, Strength, Blendable)->(BlendedValue)
-
+--
 --                                   (reference specific values from last frame)
 -- .BlendValuesLastFrame: {[Blendable]: any}
 -- .BlendValuesLastFrame_ByPriorityString: {[string]: {[Blendable]: any}}
 -- .BlendValuesLastFrame_Base: {[Blendable]: any}
+--
+--                                                   (blending helper functions)
+-- .Blend(LowPriorityValue, HighPriorityValue, Strength, Blendable)->(BlendedValue)
+-- type BlendContext (AKA Ctx)
+-- Ctx:Read(Blendable, ExclusiveLo)
+-- Ctx:Write(Blendable, Value, ExclusiveLo, RenderingOnly)
+-- Ctx:Existing(Blendable, ExclusiveLo, ExclusiveHi, RenderingOnly)
+-- Ctx:Fresh(Blendable, Value, ExclusiveLo, ExclusiveHi, RenderingOnly)
 --
 --                             (reference camera cframe & focus from last frame)
 -- .PreStackCameraCFrame: CFrame
@@ -57,9 +64,9 @@ local PRF_ON = true
 -- .PreOcclusionCameraFocus: CFrame
 -- .PostUpdateCameraCFrame: CFrame
 -- .PostUpdateCameraFocus: CFrame
--- .PostOverrideCameraCFrame: CFrame
--- .PostOverrideCameraFocus: CFrame
--- .DidApplyRenderingOverride: boolean
+-- .RenderingOnlyCameraCFrame: CFrame
+-- .RenderingOnlyCameraFocus: CFrame
+-- .DidApplyRenderingOnly: boolean
 --
 --------------------------------------------------------------------------------
 
@@ -98,60 +105,89 @@ CameraStacker.P_HighJuice = 1100
 CameraStacker.P_Max = math.huge
 
 --
--- Defines blendable values
+-- Defining blendable values
+--
+-- vv Blendables are how blendable values get tracked by the camera stacker
+-- system. There are some built-in Blendable values (for camera CFrame and
+-- Focus), and you can create your own custom Blendables as well.
+--
+-- The built-in B_CFrame and B_Focus Blendables require non-nil blendable values
+-- (as every frame the camera CFrame and Focus need to be set to some value),
+-- but if you are using custom Blendables there is no restriction on whether
+-- values can be nil or nit.
 --
 export type Blendable<T> = {
-	-- This is the default value that will be lerped. If not set, then the first
-	-- available value in the stack will be used in full if strength > 0.
+	-- vv This is the default value that will be blended from if there are no
+	-- values in the stack below the current block. If you are making a custom
+	-- Blendable, this is allowed to be nil.
 	Default: T?;
 
-	-- If set, prevents this Blendable from blending with Blendables in lower
+	-- vv If set, prevents this Blendable from blending with Blendables in lower
 	-- priority CameraBlocks. (It will blend with the default value instead.)
-	ExclusiveLo: boolean?;
-	-- If set, prevents CameraBlocks above this one from using this Blendable for
-	-- blending. (They will blend with the default instead, or the blendable
-	-- will be removed.)
-	ExclusiveHi: boolean?;
-	-- Both of the above actually do pretty much the same thing for a Blendable
-	-- on its own, however there is one subtle difference: if another CameraBlock
-	-- that doesn't have this Blendable is higher priority than a CameraBlock
-	-- with this Blendable, then IgnoreLo=true will allow this Blendable to
-	-- propagate upwards/show up in the final result, whereas PropagateHi=true
-	-- will prevent the Blendable from propagating upwards. This distinction is
-	-- expected to be more useful when used in a CameraBlock as opposed to a
-	-- Blendable.
+	ExclusiveLo: boolean?; -- Prevents using previous values.
+	-- vv If set, prevents higher priority CameraBlocks from using this Blendable
+	-- for blending. (They will blend with the default instead, or the blendable
+	-- will be removed/unset.)
+	ExclusiveHi: boolean?; -- Prevents propagation upwards.
+	-- ^^ These fields are also available in CameraBlocks, where they will apply
+	-- to all values in the CameraBlock instead of to individual Blendables,
+	-- which is probably what you would prefer to use most of the time. I don't
+	-- expect there to be many use cases where you would want to hardcode
+	-- exclusivity into Blendables themselves, but it is supported nonetheless.
 
-	-- If no Blend function is specified, then this will default to lerping (or
-	-- fully replacing value if it is not a number, Vector3, or CFrame).
+	-- vv If no Blend function is specified, then this will default to lerping
+	-- (or fully replacing value if it is not a number, Vector3, or CFrame).
 	Blend: ((LowPriority: T, HighPriority: T, HighStrength: number)->(T))?;
 
-	-- This will be called once the value has finished being blended for all
+	-- vv This will be called once the value has finished being blended for all
 	-- blocks. This should be used to "apply" the value, and it will be called
 	-- redundantly every frame even if the value isn't changing.
 	--
-	-- IMPORTANT: If the blendable value was being applied last frame, and is no
-	-- longer applied in the current frame, then this function will be called
-	-- with Value == nil so that it can do cleanup logic. Make sure to handle
-	-- that case!!
+	-- IMPORTANT: If the blendable value was being applied with a non-nil value
+	-- in the last frame, and is no longer applied in the current frame, then
+	-- this function will be called with Value == nil so that it can do cleanup
+	-- logic. Make sure to handle that case!!
 	--
 	Apply: ((Value: T?, CameraModule: any)->())?;
+
+	-- vv If you wish this Blendable to support the AffectsRenderingOnly field
+	-- (just like the built-in camera CFrame and Focus Blendables), you can
+	-- enable that here by creating a copy of the Blendable that will be tracked
+	-- separately and storing a reference to it in this field.
+	--
+	-- This Blendable needs only to be used as a table key by this module so
+	-- technically it can just be an empty table. However, if your usage code
+	-- wants to use it consider setting the Default field. And if you want to
+	-- apply the rendering-only value, you can set the Apply function on it so
+	-- that the module will call it in the usual way. (There are no guarantees
+	-- about when the Apply function will run relative to other Blendable's Apply
+	-- functions, so don't expect "rendering-only" Blendables to have their
+	-- Apply functions called after "full" blendables.)
+	--
+	RenderingOnly: Blendable<T>?;
 }
 
 local function Def<T>(Value: T): T return Value end
 
--- These Blendables' default fields get set to the camera's pre-camera-stack
--- values every frame before blending.
-CameraStacker.B_CFrame = Def<< Blendable<CFrame> >>({})
-CameraStacker.B_Focus = Def<< Blendable<CFrame> >>({})
-
--- These are used internally for CFrames that affect rendering only and avoid
+-- vv These are used internally for CFrames that affect rendering only and avoid
 -- creating feedback with the primary camera CFrame. You should only need to
 -- reference these if you need to query those rendering-only CFrames.
-CameraStacker.B_CFrameOverride = Def<< Blendable<CFrame> >>({})
-CameraStacker.B_FocusOverride = Def<< Blendable<CFrame> >>({})
+CameraStacker.B_CFrame_RenderingOnly = Def<< Blendable<CFrame> >>({})
+CameraStacker.B_Focus_RenderingOnly = Def<< Blendable<CFrame> >>({})
 
--- These are examples of custom blendables you can create. And you can also just
--- use these directly.
+-- vv These are what you should be using in your own code, these are the
+-- built-in blendables which define the camera's CFrame and Focus. These
+-- Blendables' Default fields get set to the camera's pre-camera-stack values
+-- every frame before blending.
+CameraStacker.B_CFrame = Def<< Blendable<CFrame> >>({
+	RenderingOnly = CameraStacker.B_CFrame_RenderingOnly;
+})
+CameraStacker.B_Focus = Def<< Blendable<CFrame> >>({
+	RenderingOnly = CameraStacker.B_Focus_RenderingOnly;
+})
+
+-- vv These are examples of custom blendables you can create. And you can also
+-- just use these directly.
 CameraStacker.B_FOV = Def<< Blendable<number> >>({
 	Default = 70;
 	Apply = function(Value, CameraModule)
@@ -193,7 +229,7 @@ CameraStacker.B_SpinPart = Def<< Blendable<BasePart?> >>({
 -- CameraStacker.CameraBlockNew({ ..CB.. }):SetEval_Tween({ ..CBTweenInfo.. })
 --
 type CameraBlockTweenInfo = {
-	-- By default, the camera will animate both activation and deactivation
+	-- vv By default, the camera will animate both activation and deactivation
 	-- transitions, and will use the same easing parameters for both.
 	Duration: number?;
 	EasingStyle: Enum.EasingStyle?;
@@ -202,8 +238,8 @@ type CameraBlockTweenInfo = {
 	DisableInput: boolean?; -- Only when not transitioning, or as a fallback when transitioning.
 	AffectRenderingOnly: boolean?;
 
-	-- To disable a transition before or after, you can set its duration to 0. So
-	-- to disable the activation transition (instant snap), you can set
+	-- vv To disable a transition before or after, you can set its duration to 0.
+	-- So to disable the activation transition (instant snap), you can set
 	-- DurationIn = 0 for example. You don't have to rename all your values to
 	-- In/Out etc, you can keep using the fields above for things you don't mind
 	-- being the same for both directions.
@@ -220,15 +256,16 @@ type CameraBlockTweenInfo = {
 	AffectRenderingOnlyIn: boolean?;
 	AffectRenderingOnlyOut: boolean?;
 
-	-- You can set this to prevent the tween from blocking deactivation. (So
-	-- instead of tweening out it will just exit immediately.)
+	-- vv You can set this to prevent the tween from blocking CameraBlock
+	-- deactivation. (So instead of tweening out it will just be removed
+	-- immediately.)
 	Cancelled: boolean?;
 
-	-- Cancelled will be set to true when the CB is destroyed. So destroying will
-	-- cancel the tween.
+	-- vv If set, Cancelled will be set to true when the CB is destroyed. So
+	-- destroying will cancel the tween.
 	CancelOnDestroy: boolean?;
 
-	-- Internal fields.
+	-- vv Internal fields.
 	Target: number?;
 	Start: number?;
 	Value: number?;
@@ -325,150 +362,190 @@ end
 --
 -- Defines an individual block that can be placed on the camera stack
 --
+-- vv This type is the user-provided specification for a camera block.
 export type CameraBlockBase = {
-	-- Optional, can be used to store & look up the CameraBlock using some unique
-	-- name. If provided, it will be registered under this Id.
+	-- vv Optional, can be used to store & look up the CameraBlock using some
+	-- unique name. If provided, it will be registered under this Id.
 	Id: any?;
 
-	-- Store random stuff in here.
+	-- vv Store random stuff in here, that your Eval or Blender functions may
+	-- want to access.
 	UserData: {[any]: any};
 
-	-- Higher values will evaluate last and will replace lower values. If a given
-	-- priority number is not set, it will default to 0. Allows indefinite
-	-- nesting of priorities:
+	-- vv Higher values will evaluate last and will replace lower values. If a
+	-- given priority number is not set, it will default to 0. Because this field
+	-- is an array, it allows indefinite nesting of priorities:
 	--
 	-- e.g. {1, 2} is higher than {1, 1} and smaller than {2}.
 	--
 	Priority: {number};
 
-	-- @CameraStackerTODO: A big issue in the API rn is that's kinda dumb... It's
-	-- confusing (and the implementation is a little bit inefficient) to have
-	-- both Blendables and Blenders, even though the ergonomics are alright. And
-	-- also it would just be really nice to have a single Blender function that
-	-- can do all the blending for a whole CameraBlock - but this would need a
-	-- granular "get previous value" and "write previous value" API which is not
-	-- great. Something I could do, though, is have clearly separate Blenders and
-	-- Values fields in the CameraBlock, and make the Blenders the canonical
-	-- field for whether something gets applied or not. But this would make
-	-- ergonomics worse... so it's not a great solution.
+	-- vv These two fields behave the same as the corresponding Blendable fields,
+	-- but will force their behavior for all Blendables consumed or produced by
+	-- this CameraBlock. A quick way to say "this CameraBlock is exclusive".
+	ExclusiveLo: boolean?; -- Prevents using previous values.
+	ExclusiveHi: boolean?; -- Prevents propagation upwards.
 
-	-- Built-in and user-defined blendable values, such as camera cframe, focus,
-	-- field of view.
+	-- vv (Frame ordering: 1st pass - state management & updates.) This function
+	-- will be run every frame, after the CB has been activated via
+	-- CB:SetActive(true). Ihis function should check CB.Active == false to know
+	-- when the user has requested a deactivation. It should return true if the
+	-- CB is done (has been deactivated and/or no longer needs to run updates
+	-- every frame), or false if it should continue running in future frames. If
+	-- this function is not set, the CB will be done immediately if CB.Active ==
+	-- false.
+	--
+	-- This function should take the CameraBlock and the DeltaTime, and update
+	-- the EVAL OUTPUT VALUES (defined further below). This function can actually
+	-- be used to modify any field in the CB, excluding only the Priority field
+	-- and internal fields.
+	--
+	Eval: ((CB: CameraBlock, DeltaTime: number)->(boolean))?;
+
+	-- vv (Frame ordering: 2nd pass - blending.)
 	--
 	-- This table is primarily useful for "absolute" effects such as moving the
-	-- camera to a particular location or reaching a particular value.
+	-- camera to a particular location or reaching a particular value. (If you
+	-- need "relative" effects - such as having granular control over blending,
+	-- or dynamically referencing lower priority values, you should use the Blend
+	-- function below.)
+	--
+	-- If you have an Eval function, it can write the blendable values it wants
+	-- every frame to this table, then they will be applied in the blending pass.
+	--
+	-- Values in this table will be applied in the blending phase, if there is no
+	-- Blender function (if there is a Blender function, then it can choose to
+	-- read values from this table, or it can do something else). The
+	-- BlendContext:Existing() method will also read from this table.
 	--
 	Blendables: {[Blendable<any>]: any};
 
-	-- Custom functions to blend this CB's Blendables with lower priority
-	-- Blendables. Does not require the Blendable to be in the Blendables table.
+	-- vv (Frame ordering: 2nd pass - blending.)
 	--
-	-- This table is primarily useful for "relative" effects such as camera shake
-	-- which need to make arbitrary decisions based on what lower priority
-	-- blocks produce.
+	-- This function is primarily useful for "relative" effects such as camera
+	-- shake or smooth transitions between different camera states.
 	--
-	-- These functions will execute after Eval, so you can update relevant state
-	-- first in Eval, then read it from these functions.
+	-- This function will be run every frame in the blending stage, and should
+	-- blend the values it wants to set with the values in the stack below it. It
+	-- will be run after Eval, so Eval can update things and then this function
+	-- can consume the results.
 	--
-	-- The ValueLow argument will be nil if the Blendable isn't available from the
-	-- lower priority block, but you can expect it to be guaranteed for the
-	-- built-in B_CFrame and B_Focus blendables (unless a lower priority block
-	-- intentionally returns nil).
+	-- This function will completely take over the CameraBlock's blending
+	-- process, so you will need to manually blend each Blendable, as things in
+	-- the Blendables table above won't be automatically blended if this function
+	-- is set.
 	--
-	-- If you want to obtain the "ValueHigh" (AKA the current block's value), you
-	-- can define a value in the Blendables table and use that in its
-	-- corresponding Blend function. That scenario will work without issue and is
-	-- officialy suppported. Alternatively, you just avoid putting stuff in the
-	-- Blendables table and instead construct what you need from scratch or use
-	-- intermediate values stored as custom fields in the block. Those
-	-- alternatives may make more sense organizationally in many secnarios as
-	-- they avoid mixing "absolute" and "relative" values.
+	-- To read and write Blendable values, this function must call methods on the
+	-- BlendContext AKA Ctx object passed in as an argument:
+	--[[
+	local LowerPriorityValue = Ctx:Read(CFrameBlendable)
+	local HigherPriorityValue = LowerPriorityValue * CFrame.new(0, 10, 0)
+	Ctx:Write(CFrameBlendable, HigherPriorityValue)
+	--]]
+	-- And there is a helper function to quickly update a blendable in the
+	-- default way:
+	--[[
+	Ctx:Existing(CFrameBlendable)
+	--]]
+	-- Or update it with a particular value:
+	--[[
+	Ctx:Fresh(CFrameBlendable, CFrame.new(100, 10, 250))
+	--]]
+	-- Also, if you need a blend/lerp function that handles most numeric data
+	-- types and Blendables (which may define their own Blend functions), you can
+	-- use this:
+	--[[
+	CameraStacker.Blend(LowPriorityValue, HighPriorityValue, Strength, Blendable).
+	--]]
 	--
-	Blenders: {[Blendable<any>]: (CB: CameraBlock, ValueLow: any?)->(any?)};
+	-- Finally, like the Eval function, this function can also return true in
+	-- order to indicate that the CameraBlock is done. Moreover, it is allowed to
+	-- change any of the values that the Eval function can change. However, the
+	-- observable effects of all these things will be delayed until the next
+	-- frame (unlike the Eval function whose effects will be immediate), because
+	-- at this point in the frame we have already passed the point where the
+	-- effects get applied, so if you need immediate responsiveness you should
+	-- use the Eval function for that stuff. But, if you don't care about the
+	-- responsiveness, it means you can just use this single function to do both
+	-- eval & blending which is convenient!
+	--
+	Blender: ((Ctx: BlendContext, CB: CameraBlock, DeltaTime: number)->(boolean?))?;
 
-	-- These two fields behave the same as the corresponding Blendable fields,
-	-- but will force their behavior for all Blendables consumed or produced by
-	-- this CameraBlock. A quick way to say "this CameraBlock is exclusive".
-	ExclusiveLo: boolean?;
-	ExclusiveHi: boolean?;
-
-	-- This function should take the CameraBlock and the DeltaTime, and update s
-	-- the EVAL OUTPUT VALUES (defined below). This function will be run every
-	-- frame, after the CB has been activated via CB:SetActive(true). It should
-	-- check CB.Active == false to know when the user has requested a
-	-- deactivation. It should return true if the CB is done (has been
-	-- deactivated and/or no longer needs to run updates every frame), or false
-	-- if it should continue running in future frames. If this function is not
-	-- set, the CB will be done immediately if CB.Active == false. This function
-	-- can also be used to arbitrarily modify the Blendables, Blenders,
-	-- ExclusiveLo, and ExclusiveHi fields. But DO NOT MODIFY the Priority field.
-	Eval: ((CB: CameraBlock, DeltaTime: number)->(boolean))?;
-
-	-- EVAL OUTPUT VALUES (these can be statically configured if Eval is not
-	-- defined or does not modify them)
+	-- EVAL OUTPUT VALUES (these can be statically configured if Eval and Blend
+	-- are not defined or do not modify them)
 	--
-	-- Defines the strength of how values will be blended on top of whatever is
-	-- beneath it. (Or whatever the blend function for a blendable property is.)
-	-- This ONLY affects blending, it does not affect the camera stack behaviour.
-	-- If this unset, it will default to 1. The use of this field is only
-	-- required for blending without custom blend functions, as custom blend
-	-- functions have a choice of whether to use this field or something else.
+	-- vv Defines the strength of how values in this block will be blended on top
+	-- of whatever is beneath them. This ONLY affects value blending, it does
+	-- not affect the logical camera stacking behaviour. If this unset, it will
+	-- default to 1. This field gets used when you have Blendables that are
+	-- blended automatically (e.g. you don't have a Blender function, or you
+	-- don't call BlendContext:Existing/Fresh()), but if you are doing custom
+	-- blending there is no requirement to use it.
 	Strength: number?;
-	-- Defines whether camera input should be disabled or not. (Final per-frame
-	-- result is the union of all camera blocks.)
+	--
+	-- vv Defines whether camera input should be disabled or not. (Final
+	-- per-frame result is the union of all camera blocks.)
 	DisableInput: boolean?;
-	-- Defines whether the camera occlusion module should be disabled or not.
+	--
+	-- vv Defines whether the camera occlusion module should be disabled or not.
 	-- (Final per-frame result is the union of all camera blocks.)
 	DisableOcclusion: boolean?;
-	-- If true, the camera CFrame & focus output of this block will be applied to
-	-- the camera after setting Camera.CFrame, and the original Camera.CFrame
+	--
+	-- vv If true, the camera CFrame & focus output of this block will be applied
+	-- to the camera after setting Camera.CFrame, and the original Camera.CFrame
 	-- will be restored before the camera updates again. Useful for temporary
 	-- effects layered on top of whatever camera is active and for which you wish
 	-- to avoid feedback, e.g. screen shake.
 	--
 	-- This still respects the stacking behavior, and if a higher priority block
-	-- takes over with AffectRenderingOnly=false, it will be replaced by the
-	-- higher block (it won't be layered on top), and the higher block may
-	-- upgrade the "rendering only" CFrame to a "full CFrame" so that the higher
+	-- takes over with AffectRenderingOnly=false, this block will be replaced by
+	-- the higher block (so it won't be layered on top), and the higher block may
+	-- upgrade the "rendering only" value to a "full" value so that the higher
 	-- blocker can blend with it.
 	--
-	-- Code that wishes to query the values of CFrame/focus last frame will get
+	-- Code that wishes to query the values of CFrame/Focus last frame will get
 	-- the "full CFrame" by default if it uses .B_CFrame, so if it wants to query
-	-- the "rendering only CFrame" then it can read .B_CFrameOverride first then
+	-- the "rendering only CFrame" then it can read .B_CFrame_RenderingOnly first then
 	-- fall back to .B_CFrame if it fails.
+	--
+	-- If you want to make custom Blendables be affected by this as well, you can
+	-- use the Blendable.RenderingOnly field.
 	--
 	AffectRenderingOnly: boolean?;
 }
+-- vv This type is the initialized camera block which is ready to use.
 export type CameraBlock = CameraBlockBase & {
-	-- Set to true when should be in use. The CameraBlock may still be evaluation
-	-- every frame even if this false however (if it wants to do a transition
-	-- out animation).
+
+	-- vv Set to true when should be in use. The CameraBlock may still be
+	-- evaluating every frame even if this false however (e.g. if it wants to do
+	-- a transition out animation).
 	Active: boolean?;
 
-	-- Set to true immediately when destroyed. We guarantee that if
+	-- vv Set to true immediately when destroyed. We guarantee that if
 	-- Destroyed==true then Active==false.
 	Destroyed: boolean?;
 
-	-- Debug info.
+	-- vv Debug info.
 	Traceback: string;
 
-	-- Commonly used constant values that are also stored inside CameraStacker.
+	-- vv Commonly used constant values that are also stored inside
+	-- CameraStacker.
 	B_CFrame: Blendable<CFrame>;
 	B_Focus: Blendable<CFrame>;
-	B_CFrameOverride: Blendable<CFrame>;
-	B_FocusOverride: Blendable<CFrame>;
+	B_CFrame_RenderingOnly: Blendable<CFrame>;
+	B_Focus_RenderingOnly: Blendable<CFrame>;
 	E_Tween: (CB: CameraBlock, DeltaTime: number)->(boolean);
 
-	-- Setup E_Tween on this CameraBlock
+	-- vv Setup E_Tween on this CameraBlock
 	SetEval_Tween: (CB: CameraBlock, CBTweenInfo: CameraBlockTweenInfo)->(CameraBlock);
 
-	-- Activate the CameraBlock, putting in the array of CameraBlocks to be
+	-- vv Activate the CameraBlock, putting in the array of CameraBlocks to be
 	-- updated every frame. If deactivating, it won't be removed from the array,
 	-- instead it's more of a communication mechanism like "the user indicated
 	-- they want this block to be deactivated".
 	SetActive: (CB: CameraBlock, Active: boolean)->(CameraBlock);
 
-	-- Destroy the block, deactivating it and setting Destroyed = true, and
+	-- vv Destroy the block, deactivating it and setting Destroyed = true, and
 	-- unregistering its Id.
 	Destroy: (CB: CameraBlock)->();
 }
@@ -497,7 +574,6 @@ do
 			CB.Priority = {}
 		end
 		CB.Blendables = CB.Blendables or {}
-		CB.Blenders = CB.Blenders or {}
 		CB.UserData = CB.UserData or {}
 		CB.Traceback = debug.traceback(nil, 2)
 		setmetatable(CB, MetaCB)
@@ -506,8 +582,8 @@ do
 
 	MetaCB.B_CFrame = CameraStacker.B_CFrame
 	MetaCB.B_Focus = CameraStacker.B_Focus
-	MetaCB.B_CFrameOverride = CameraStacker.B_CFrameOverride
-	MetaCB.B_FocusOverride = CameraStacker.B_FocusOverride
+	MetaCB.B_CFrame_RenderingOnly = CameraStacker.B_CFrame_RenderingOnly
+	MetaCB.B_Focus_RenderingOnly = CameraStacker.B_Focus_RenderingOnly
 	MetaCB.E_Tween = CameraStacker.E_Tween
 	function MetaCB.SetEval_Tween(CB: CameraBlock, CBTweenInfo: CameraBlockTweenInfo): CameraBlock
 		CB.Eval = CB.E_Tween
@@ -594,9 +670,194 @@ function CameraStacker.QueryBlendValuesLastFrameForPriority(Priority: {number}, 
 	return HighestBlendValues
 end
 
+local V3_Lerp = Vector3.zero.Lerp
+local CF_Lerp = CFrame.identity.Lerp
+function CameraStacker.Blend(Low: any, High: any, Strength: number?, Blendable: Blendable<any>): any
+	local NewValue
+	local Strength = math.clamp(Strength or 1, 0, 1)
+	if Strength <= 0 then
+		NewValue = Low
+	elseif not Low then
+		NewValue = High
+	elseif Blendable.Blend then
+		NewValue = Blendable.Blend(Low, High, Strength)
+	else
+		local TypeT = typeof(High)
+		local TypeB = typeof(Low)
+		if TypeT ~= TypeB then
+			NewValue = High
+		elseif TypeT == "number" then
+			NewValue = math.lerp(Low, High, Strength)
+		elseif TypeT == "Vector3" then
+			NewValue = V3_Lerp(Low, High, Strength)
+		elseif TypeT == "CFrame" then
+			NewValue = CF_Lerp(Low,  High, Strength)
+		else
+			NewValue = High
+		end
+	end
+	return NewValue
+end
+
+export type BlendContext = {
+	CB: CameraBlock;
+	BlendedValues: {[Blendable<any>]: any};
+	BlendedValuesSet: {[Blendable<any>]: boolean};
+	NewExclusiveHi_ByBlendable: {[Blendable<any>]: boolean};
+	WasExclusiveHi_ByBlendable: {[Blendable<any>]: boolean};
+
+	Read: <T>(
+		Ctx: BlendContext,
+		Blendable: Blendable<T>,
+		OverrideExclusiveLo: boolean?
+	)->(T, boolean);
+	Write: <T>(
+		Ctx: BlendContext,
+		Blendable: Blendable<T>,
+		Value: T,
+		OverrideExclusiveHi: boolean?,
+		OverrideRenderingOnly: boolean?
+	)->();
+	Existing: <T>(
+		Ctx: BlendContext,
+		Blendable: Blendable<T>,
+		OverrideExclusiveLo: boolean?,
+		OverrideExclusiveHi: boolean?,
+		OverrideRenderingOnly: boolean?
+	)->();
+	Fresh: <T>(
+		Ctx: BlendContext,
+		Blendable: Blendable<T>,
+		Value: T,
+		OverrideExclusiveLo: boolean?,
+		OverrideExclusiveHi: boolean?,
+		OverrideRenderingOnly: boolean?
+	)->();
+}
+-- For perf reasons, we reuse the Ctx table and avoid using metatables.
+local Ctx = {} :: BlendContext
+function Ctx.Read<T>(
+	Ctx: BlendContext,
+	Blendable: Blendable<T>,
+	OverrideExclusiveLo: boolean?
+): (T, boolean)
+	local CanUseLow = false
+	if not Ctx.WasExclusiveHi_ByBlendable[Blendable] then
+		if OverrideExclusiveLo ~= nil then
+			CanUseLow = if OverrideExclusiveLo then true else false
+		else
+			CanUseLow =
+				(not Ctx.CB.ExclusiveLo) and
+				(not Blendable.ExclusiveLo)
+		end
+	end
+
+	-- When reading, we always use the most recent value. So when
+	-- transitioning from "full" to "rendering-only", the block will receive
+	-- the previous "full" value. And when transitioning from "rendering-only"
+	-- to "normal", the block will receive the previous "rendering-only"
+	-- value, so the "rendering-only" value is being upgraded to "full"
+	-- status.
+	local Low = nil
+	local HasLow = false
+	if not HasLow then
+		if CanUseLow then
+			local BlendableRO: any = Blendable.RenderingOnly
+			if Ctx.BlendedValuesSet[BlendableRO] then
+				HasLow = true
+				Low = Ctx.BlendedValues[BlendableRO]
+			end
+		end
+	end
+	if not HasLow then
+		if CanUseLow then
+			if Ctx.BlendedValuesSet[Blendable] then
+				HasLow = true
+				Low = Ctx.BlendedValues[Blendable]
+			end
+		end
+	end
+	if not HasLow then
+		Low = Blendable.Default
+	end
+	return Low, HasLow
+end
+function Ctx.Write<T>(
+	Ctx: BlendContext,
+	Blendable: Blendable<T>,
+	Value: T,
+	OverrideExclusiveHi: boolean?,
+	OverrideRenderingOnly: boolean?
+)
+	local RenderingOnly
+	if OverrideRenderingOnly ~= nil then
+		RenderingOnly = if OverrideRenderingOnly then true else false
+	else
+		RenderingOnly = if Ctx.CB.AffectRenderingOnly then true else false
+	end
+
+	-- When writing, we will always clear the rendering only value unless it
+	-- is being used.
+	local BlendableRO: any = Blendable.RenderingOnly
+	if not BlendableRO then
+		Ctx.BlendedValues[Blendable] = Value
+		Ctx.BlendedValuesSet[Blendable] = true
+
+	elseif RenderingOnly then
+		Ctx.BlendedValues[BlendableRO] = Value
+		Ctx.BlendedValuesSet[BlendableRO] = true
+
+	else
+		Ctx.BlendedValues[BlendableRO] = nil
+		Ctx.BlendedValuesSet[BlendableRO] = nil
+
+		Ctx.BlendedValues[Blendable] = Value
+		Ctx.BlendedValuesSet[Blendable] = true
+	end
+
+	-- Track exclusivity and the presence of blendables.
+	Ctx.WasExclusiveHi_ByBlendable[Blendable] = nil
+	if OverrideExclusiveHi ~= nil then
+		Ctx.NewExclusiveHi_ByBlendable[Blendable] = if OverrideExclusiveHi then true else false
+	else
+		Ctx.NewExclusiveHi_ByBlendable[Blendable] = if Blendable.ExclusiveHi then true else false
+	end
+end
+function Ctx.Existing<T>(
+	Ctx: BlendContext,
+	Blendable: Blendable<T>,
+	OverrideExclusiveLo: boolean?,
+	OverrideExclusiveHi: boolean?,
+	OverrideRenderingOnly: boolean?
+)
+	local CB = Ctx.CB
+	local Low = Ctx:Read(Blendable, OverrideExclusiveLo)
+	local High = CB.Blendables[Blendable]
+	local NewValue = CameraStacker.Blend(Low, High, CB.Strength, Blendable)
+	Ctx:Write(Blendable, NewValue, OverrideExclusiveHi, OverrideRenderingOnly)
+end
+function Ctx.Fresh<T>(
+	Ctx: BlendContext,
+	Blendable: Blendable<T>,
+	Value: T,
+	OverrideExclusiveLo: boolean?,
+	OverrideExclusiveHi: boolean?,
+	OverrideRenderingOnly: boolean?
+)
+	local Low = Ctx:Read(Blendable, OverrideExclusiveLo)
+	local NewValue = CameraStacker.Blend(Low, Value, CB.Strength, Blendable)
+	Ctx:Write(Blendable, NewValue, OverrideExclusiveHi, OverrideRenderingOnly)
+end
+
 --
 -- Internal setup & evaluation logic
 --
+
+local CB_Unknown: CameraBlock = ({
+	Id = "UNKNOWN_FALLBACK";
+	Traceback = "UNKNOWN_FALLBACK";
+} :: any)
+table.freeze(CB_Unknown)
 
 local function CameraStackerEvaluate(DeltaTime)
 	if PRF_ON then debug.profilebegin("CameraStackerEvaluate") end
@@ -650,26 +911,25 @@ local function CameraStackerEvaluate(DeltaTime)
 		-- If the thread completed then we can exit the loop.
 		if IndexDidComplete then
 			break
+
 		-- If the thread doesn't complete immediately, deactivate the CameraBlock
 		-- since there's something wrong with it.
 		else
-			local CB: CameraBlock = CameraStacker.CBs_Active[#CameraStacker.CBs_Active] or ({
-				Id = "UNKNOWN_FALLBACK";
-				Traceback = "UNKNOWN_FALLBACK";
-			} :: any)
+			local CB: CameraBlock = CameraStacker.CBs_Active[#CameraStacker.CBs_Active] or CB_Unknown
 			CB.Active = false
 			table.remove(CameraStacker.CBs_Active, Index)
 			Index -= 1
+
 			-- The CameraBlock evaluation yielded, so let's warn.
 			local Status = coroutine.status(Thread)
 			if Status == "suspended" then
-				warn(("CameraBlock performed a yielding operation. It should never yield. Id: %s, Trace:\n%s")
+				warn(("CameraBlock Eval function performed a yielding operation. It should never yield. Id: %s, Trace:\n%s")
 					:format(tostring(CB.Id), CB.Traceback))
 			elseif Status == "dead" then
-				warn(("CameraBlock threw an error. Id: %s, Trace:\n%s")
+				warn(("CameraBlock Eval function threw an error. Id: %s, Trace:\n%s")
 					:format(tostring(CB.Id), CB.Traceback))
 			else
-				warn(("CameraBlock evaluation thread had invalid status: %s. Id: %s, Trace:\n%s")
+				warn(("CameraBlock Eval function caused thread to have invalid status: %s. Id: %s, Trace:\n%s")
 					:format(tostring(Status), tostring(CB.Id), CB.Traceback))
 			end
 		end
@@ -679,39 +939,11 @@ local function CameraStackerEvaluate(DeltaTime)
 	return DisableInput, DisableOcclusion
 end
 
-local V3_Lerp = Vector3.zero.Lerp
-local CF_Lerp = CFrame.identity.Lerp
-function CameraStacker.Blend(Low: any, High: any, Strength: number?, Blendable: Blendable<any>): any
-	local NewValue
-	local Strength = math.clamp(Strength or 1, 0, 1)
-	if Strength <= 0 then
-		NewValue = Low
-	elseif not Low then
-		NewValue = High
-	elseif Blendable.Blend then
-		NewValue = Blendable.Blend(Low, High, Strength)
-	else
-		local TypeT = typeof(High)
-		local TypeB = typeof(Low)
-		if TypeT ~= TypeB then
-			NewValue = High
-		elseif TypeT == "number" then
-			NewValue = math.lerp(Low, High, Strength)
-		elseif TypeT == "Vector3" then
-			NewValue = V3_Lerp(Low, High, Strength)
-		elseif TypeT == "CFrame" then
-			NewValue = CF_Lerp(Low,  High, Strength)
-		else
-			NewValue = High
-		end
-	end
-	return NewValue
-end
-
 local function CameraStackerBlend(
 	InputCFrame: CFrame,
 	InputFocus: CFrame,
-	CameraModule
+	CameraModule,
+	DeltaTime: number
 ): (CFrame, CFrame, CFrame?, CFrame?)
 	if PRF_ON then debug.profilebegin("CameraStackerBlend") end
 
@@ -722,120 +954,134 @@ local function CameraStackerBlend(
 	-- this because even though the overrides' default values will never be read
 	-- in this function, usage code may try to read them from
 	-- BlendValuesLastFrame_* tables, or in other arbitrary situations.
-	CameraStacker.B_CFrameOverride.Default = InputCFrame
-	CameraStacker.B_FocusOverride.Default = InputCFrame
+	CameraStacker.B_CFrame_RenderingOnly.Default = InputCFrame
+	CameraStacker.B_Focus_RenderingOnly.Default = InputFocus
 
-	local BlendedValues = {}
+	Ctx.BlendedValues = {
+		[CameraStacker.B_CFrame] = InputCFrame;
+		[CameraStacker.B_Focus] = InputFocus;
+	}
+	Ctx.BlendedValuesSet = {
+		[CameraStacker.B_CFrame] = true;
+		[CameraStacker.B_Focus] = true;
+	}
+	Ctx.WasExclusiveHi_ByBlendable = {}
+	Ctx.NewExclusiveHi_ByBlendable = {}
+
 	local BlendedValues_ByPriorityString = {}
-	local WasExclusiveHi_ByBlendable: {[Blendable<any>]: boolean} = {}
+	local BlendedValues_Base = table.clone(Ctx.BlendedValues)
 
-	local function UpdateBlendable(CB: CameraBlock, NewExclusiveHi_ByBlendable, Blendable)
-		local CanUseLow =
-			(not CB.ExclusiveLo) and
-			(not Blendable.ExclusiveLo) and
-			(not WasExclusiveHi_ByBlendable[Blendable])
+	local Index = #CameraStacker.CBs_Active
+	while true do
+		local IndexDidComplete = true
 
-		local BlendableOverride
-		if Blendable == CameraStacker.B_CFrame then
-			BlendableOverride = CameraStacker.B_CFrameOverride
-		elseif Blendable == CameraStacker.B_Focus then
-			BlendableOverride = CameraStacker.B_FocusOverride
-		end
+		local Thread = task.spawn(function()
+			while Index > 0 do
+				IndexDidComplete = false
 
-		local BlendableKey = Blendable
-		if BlendableOverride then
-			if CB.AffectRenderingOnly then
-				BlendableKey = BlendableOverride
-				local Existing = BlendedValues[BlendableOverride]
-				BlendedValues[BlendableOverride] =
-					if Existing ~= nil then Existing else BlendedValues[Blendable]
-			else
-				-- Here we enable smooth transitions between low priority "rendering
-				-- only" / "override" blendables and high priority "full"
-				-- blendables by upgrading the rendering only blendable to a full
-				-- blendable.
-				local LowRender = BlendedValues[BlendableOverride]
-				if LowRender ~= nil then
-					BlendedValues[Blendable] = LowRender
+				local CB = CameraStacker.CBs_Active[Index]
+				Ctx.CB = CB
+				Ctx.NewExclusiveHi_ByBlendable = {}
+
+				if CB.Blender then
+					local Finished = CB.Blender(Ctx, CB, DeltaTime)
+					if Finished then
+						CB.Active = false
+						table.remove(CameraStacker.CBs_Active, Index)
+					end
+				else
+					for Blendable in CB.Blendables do
+						Ctx:Existing(Blendable)
+					end
 				end
-			end
-		end
 
-		local Low = nil
-		if CanUseLow then
-			Low = BlendedValues[BlendableKey]
-		end
-		if Low == nil then
-			Low = Blendable.Default
-		end
-		local NewValue
-		local Blender = CB.Blenders[Blendable]
-		if Blender then
-			NewValue = Blender(CB, Low)
+				-- Clean up blendables that were not set this block. (This table is
+				-- being used to track whether blendables are being set or not in
+				-- addition to whether they were actually ExclusiveHi or not.)
+				for Blendable, WasExclusiveHi in Ctx.WasExclusiveHi_ByBlendable do
+					local CanUseLow =
+						(not CB.ExclusiveLo) and
+						(not Blendable.ExclusiveLo) and
+						(not WasExclusiveHi)
+
+					if not CanUseLow then
+						Ctx.BlendedValues[Blendable] = nil
+						Ctx.BlendedValuesSet[Blendable] = nil
+
+						local BlendableRO = Blendable.RenderingOnly
+						if BlendableRO then
+							Ctx.BlendedValues[BlendableRO] = nil
+							Ctx.BlendedValuesSet[BlendableRO] = nil
+						end
+					end
+				end
+
+				-- Replace the previous "Was" table with the "New" table. (Actually clearing
+				-- and swapping them for perf.)
+				local Temp = Ctx.WasExclusiveHi_ByBlendable
+				Ctx.WasExclusiveHi_ByBlendable = Ctx.NewExclusiveHi_ByBlendable
+				Ctx.NewExclusiveHi_ByBlendable = Temp
+				table.clear(Temp)
+
+				-- Creates a normalized priority string (redundant 0s removed), which
+				-- identifies a priority in a way such that identical priorities will have
+				-- the same string value. It's kinda dumb to do this priority string
+				-- generation every frame, but it's the only way to be sure really.
+				local Normalized = table.clone(CB.Priority)
+				for NIndex = #Normalized, 1, -1 do
+					if Normalized[NIndex] == 0 then
+						Normalized[NIndex] = nil
+					else
+						break
+					end
+				end
+				local PriorityString = table.concat(Normalized, ",")
+				BlendedValues_ByPriorityString[PriorityString] = table.clone(Ctx.BlendedValues)
+
+				Index -= 1
+				IndexDidComplete = true
+			end
+		end)
+
+		-- If the thread completed then we can exit the loop.
+		if IndexDidComplete then
+			break
+
+		-- If the thread doesn't complete immediately, deactivate the CameraBlock
+		-- since there's something wrong with it.
 		else
-			local High = CB.Blendables[Blendable]
-			assert(High ~= nil)
-			NewValue = CameraStacker.Blend(Low, High, CB.Strength, Blendable)
-		end
-		BlendedValues[BlendableKey] = NewValue
-		WasExclusiveHi_ByBlendable[Blendable] = nil
-		NewExclusiveHi_ByBlendable[Blendable] = if Blendable.ExclusiveHi then true else false
-	end
+			local CB: CameraBlock = CameraStacker.CBs_Active[#CameraStacker.CBs_Active] or CB_Unknown
+			CB.Active = false
+			table.remove(CameraStacker.CBs_Active, Index)
+			Index -= 1
 
-	for Index = #CameraStacker.CBs_Active, 1, -1 do
-		local CB = CameraStacker.CBs_Active[Index]
-		local NewExclusiveHi_ByBlendable: {[Blendable<any>]: boolean} = {}
-
-		for Blendable, High in CB.Blendables do
-			UpdateBlendable(CB, NewExclusiveHi_ByBlendable, Blendable)
-		end
-		for Blendable in CB.Blenders do
-			if not CB.Blendables[Blendable] then
-				UpdateBlendable(CB, NewExclusiveHi_ByBlendable, Blendable)
-			end
-		end
-		for Blendable, WasExclusiveHi in WasExclusiveHi_ByBlendable do
-			local CanUseLow =
-				(not CB.ExclusiveLo) and
-				(not Blendable.ExclusiveLo) and
-				(not WasExclusiveHi)
-
-			if not CanUseLow then
-				BlendedValues[Blendable] = nil
-				if Blendable == CameraStacker.B_CFrame then
-					BlendedValues[CameraStacker.B_CFrameOverride] = nil
-				elseif Blendable == CameraStacker.B_Focus then
-					BlendedValues[CameraStacker.B_FocusOverride] = nil
-				end
-			end
-		end
-		WasExclusiveHi_ByBlendable = NewExclusiveHi_ByBlendable
-
-		-- Creates a normalized priority string (redundant 0s removed), which
-		-- identifies a priority in a way such that identical priorities will have
-		-- the same string value. It's kinda dumb to do this priority string
-		-- generation every frame, but it's the only way to be sure really.
-		local Normalized = table.clone(CB.Priority)
-		for NIndex = #Normalized, 1, -1 do
-			if Normalized[NIndex] == 0 then
-				Normalized[NIndex] = nil
+			-- The CameraBlock evaluation yielded, so let's warn.
+			local Status = coroutine.status(Thread)
+			if Status == "suspended" then
+				warn(("CameraBlock Blend function performed a yielding operation. It should never yield. Id: %s, Trace:\n%s")
+					:format(tostring(CB.Id), CB.Traceback))
+			elseif Status == "dead" then
+				warn(("CameraBlock Blend function threw an error. Id: %s, Trace:\n%s")
+					:format(tostring(CB.Id), CB.Traceback))
 			else
-				break
+				warn(("CameraBlock Blend function caused thread to have invalid status: %s. Id: %s, Trace:\n%s")
+					:format(tostring(Status), tostring(CB.Id), CB.Traceback))
 			end
 		end
-		local PriorityString = table.concat(Normalized, ",")
-		BlendedValues_ByPriorityString[PriorityString] = table.clone(BlendedValues)
 	end
 
+	-- Apply values that are present. If they are set, they will be applied every
+	-- frame. If they were set and become unset, the apply function will be
+	-- called once with a nil argument.
 	local Visited = {}
-	for Blendable, Value in BlendedValues do
-		Visited[Blendable] = Value
+	for Blendable in Ctx.BlendedValuesSet do
+		Visited[Blendable] = true
 		if Blendable.Apply then
-			Blendable.Apply(Value, CameraModule)
+			Blendable.Apply(Ctx.BlendedValues[Blendable], CameraModule)
 		end
 	end
-	for Blendable in CameraStacker.BlendValuesLastFrame do
-		if Visited[Blendable] == nil then
+	for Blendable, Value in CameraStacker.BlendValuesLastFrame do
+		if (Value ~= nil) and (not Visited[Blendable]) then
 			if Blendable.Apply then
 				Blendable.Apply(nil, CameraModule)
 			end
@@ -843,18 +1089,32 @@ local function CameraStackerBlend(
 	end
 	CameraStacker.BlendValuesLastFrame = Visited
 	CameraStacker.BlendValuesLastFrame_ByPriorityString = BlendedValues_ByPriorityString
-	CameraStacker.BlendValuesLastFrame_Base = {
-		[CameraStacker.B_CFrame] = CameraStacker.B_CFrame.Default;
-		[CameraStacker.B_Focus] = CameraStacker.B_Focus.Default;
-	}
+	CameraStacker.BlendValuesLastFrame_Base = BlendedValues_Base
+
+	local WarnAbout = {}
+	if Ctx.BlendedValues[CameraStacker.B_CFrame] == nil then
+		WarnAbout[#WarnAbout+1] = "B_CFrame"
+		Ctx.BlendedValues[CameraStacker.B_CFrame] = InputCFrame
+	end
+	if Ctx.BlendedValues[CameraStacker.B_Focus] == nil then
+		WarnAbout[#WarnAbout+1] = "B_Focus"
+		Ctx.BlendedValues[CameraStacker.B_Focus] = InputFocus
+	end
+	if WarnAbout[1] then
+		warn(("Required blendable value%s {%s} %s nil, %s being unset by a CameraBlock?"):format(
+			if WarnAbout[2] then "s" else "",
+			if WarnAbout[2] then "are" else "is",
+			table.concat(WarnAbout, ","),
+			if WarnAbout[2] then "are they" else "is it"))
+	end
 
 	if PRF_ON then debug.profileend() end
 
 	return
-		BlendedValues[CameraStacker.B_CFrame] or CameraStacker.B_CFrame.Default,
-		BlendedValues[CameraStacker.B_Focus] or CameraStacker.B_Focus.Default,
-		BlendedValues[CameraStacker.B_CFrameOverride],
-		BlendedValues[CameraStacker.B_FocusOverride]
+		Ctx.BlendedValues[CameraStacker.B_CFrame],
+		Ctx.BlendedValues[CameraStacker.B_Focus],
+		Ctx.BlendedValues[CameraStacker.B_CFrame_RenderingOnly],
+		Ctx.BlendedValues[CameraStacker.B_Focus_RenderingOnly]
 end
 
 CameraStacker.PreStackCameraCFrame = CFrame.identity
@@ -866,10 +1126,10 @@ CameraStacker.PreOcclusionCameraFocus = CFrame.identity
 CameraStacker.PostUpdateCameraCFrame = CFrame.identity
 CameraStacker.PostUpdateCameraFocus = CFrame.identity
 
-CameraStacker.PostOverrideCameraCFrame = CFrame.identity
-CameraStacker.PostOverrideCameraFocus = CFrame.identity
+CameraStacker.RenderingOnlyCameraCFrame = CFrame.identity
+CameraStacker.RenderingOnlyCameraFocus = CFrame.identity
 
-CameraStacker.DidApplyRenderingOverride = false
+CameraStacker.DidApplyRenderingOnly = false
 
 -- @CameraStackerTODO: the CameraStacker can only be used on the
 -- PlayerModule/default camera itself, but really it is a more generic system
@@ -889,8 +1149,8 @@ return function(PlayerModule: ModuleScript)
 		if self.activeCameraController then
 			local CurrentCamera = game.Workspace.CurrentCamera :: Camera
 
-			if CameraStacker.DidApplyRenderingOverride then
-				CameraStacker.DidApplyRenderingOverride = false
+			if CameraStacker.DidApplyRenderingOnly then
+				CameraStacker.DidApplyRenderingOnly = false
 				CurrentCamera.CFrame = CameraStacker.PostUpdateCameraCFrame
 				CurrentCamera.Focus = CameraStacker.PostUpdateCameraFocus
 			end
@@ -906,8 +1166,8 @@ return function(PlayerModule: ModuleScript)
 			CameraStacker.PreStackCameraCFrame = NewCameraCFrame
 			CameraStacker.PreStackCameraFocus = NewCameraFocus
 
-			local BlendedCFrame, BlendedFocus, BlendedCFrameOverride, BlendedFocusOverride =
-				CameraStackerBlend(NewCameraCFrame, NewCameraFocus, CameraModule)
+			local BlendedCFrame, BlendedFocus, BlendedCFrame_RenderingOnly, BlendedFocus_RenderingOnly =
+				CameraStackerBlend(NewCameraCFrame, NewCameraFocus, CameraModule, DeltaTime)
 
 			NewCameraCFrame = BlendedCFrame
 			NewCameraFocus = BlendedFocus
@@ -936,13 +1196,17 @@ return function(PlayerModule: ModuleScript)
 				CameraInput.resetInputForFrameEnd()
 			end
 
-			if BlendedCFrameOverride then
-				CurrentCamera.CFrame = BlendedCFrameOverride
-				CameraStacker.DidApplyRenderingOverride = true
+			-- Apply rendering only properties.
+			CameraStacker.RenderingOnlyCameraCFrame = BlendedCFrame_RenderingOnly or NewCameraCFrame
+			CameraStacker.RenderingOnlyCameraFocus = BlendedFocus_RenderingOnly or NewCameraFocus
+
+			if BlendedCFrame_RenderingOnly then
+				CurrentCamera.CFrame = BlendedCFrame_RenderingOnly
+				CameraStacker.DidApplyRenderingOnly = true
 			end
-			if BlendedFocusOverride then
-				CurrentCamera.Focus = BlendedFocusOverride
-				CameraStacker.DidApplyRenderingOverride = true
+			if BlendedFocus_RenderingOnly then
+				CurrentCamera.Focus = BlendedFocus_RenderingOnly
+				CameraStacker.DidApplyRenderingOnly = true
 			end
 		end
 	end
