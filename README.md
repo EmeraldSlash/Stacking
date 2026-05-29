@@ -7,7 +7,7 @@ Installation is done at runtime. All you need to do is require the module, and c
 
 Installing it on forked player scripts is recommended for stability, but you can use it on the latest dynamically updated PlayerModule if you really want to.
 
-Here is some example code (last updated for version 5):
+Here is some example code (last updated for version 6):
 ```luau
 -- Installation at runtime.
 local PlayerModule = game.Players.LocalPlayer:WaitForChild("PlayerScripts"):WaitForChild("PlayerModule")
@@ -26,8 +26,8 @@ if CameraStacker then
   local B_Blur: CameraStacker.Blendable<number> = {
     Default = 0;
     Apply = function(Value)
-      -- Value may be nil if the blendable is being unset because it was
-      -- used last frame and not used this frame.
+      -- Value may be nil if the blendable is being unset (i.e. it was
+      -- used last frame and is not used this frame.)
       BlurEffect.Size = Value or 0
     end;
   }
@@ -40,49 +40,40 @@ if CameraStacker then
     -- Allows unlimited sub priorities.
     Priority = {CameraStacker.P_GameplayJuice, 10, 2};
 
+    -- Prevent feedback by making the camera CFrame/focus changes invisible
+    -- to the next frame.
+    AffectRenderingOnly = true;
+
     -- Set the "non-relative" / "absolute" blendable values this block uses.
     -- ("Relative" blendable values are handled by Blenders instead.)
     Blendables = {
       [B_Blur] = 24;
     };
 
-    -- Prevent feedback by making the camera CFrame/focus changes invisible
-    -- to the next frame.
-    AffectRenderingOnly = true;
-
     -- The main behavioural controller of this block, gets executed every frame.
     Eval = function(CameraBlock, DeltaTime)
       -- Let's only apply this block at strength based on math.sin() of current time.
       CameraBlock.Strength = (math.sin(tick()) + 1) / 2
 
-      -- You can ignore this, it is relevant to Blends's B_CFrame function below.
-      --CameraBlock.Blendables[CameraStacker.B_CFrame] = CFrame.new(1, 1, 1)
-      --CameraBlock.UserData.ShakeDirection = CFrame.new(1, 1, 1)
-      
-      -- Indicate when the block is done.
       local IsFinished = not CameraBlock.Active
       return IsFinished
     end;
 
-    -- Custom blenders let us apply changes to blendables relative to lower
-    -- priority blocks.
-    Blenders = {
-      [CameraStacker.B_CFrame] = function(CameraBlock, ValueLow)
+    -- Controls how blendables get blended with lower priority blocks.
+    -- Can also use it as the main behavioural controller if you want (not demonstrated here),
+    -- but will have 1 frame of latency with some aspects of the behavioural control.
+    Blender = function(Ctx, CameraBlock, DeltaTime)
+      
+      -- Automatically blend the blur specified above.
+      Ctx:Existing(B_Blur)
 
-        -- ValueLo for B_CFrame and B_Focus should be guaranteed, but may not be
-        -- the case with other blendables if none have been set yet.
-        assert(ValueLow)
+      -- Apply camera CFrame relative to the lower priority CFrame, in this case
+-     -- some dumb translational camera shake.
+      local LowCFrame = Ctx:Read(CameraStacker.B_CFrame)
+      local ShakeDirection = CFrame.new(1, 1, 1)
+      Ctx:Write(CameraStacker.B_CFrame, LowCFrame * (ShakeDirection * CameraBlock.Strength))
 
-        -- All valid approaches. But for the first one, it might be confusing
-        -- for you if you start mixing "absolute" and "relative" blendable values!
-        --local ShakeOirection = CameraBlock.Blendables[CameraStacker.B_CFrame]
-        --local ShakeDirection = CameraBlock.UserData.ShakeDirection
-        local ShakeDirection = CFrame.new(1, 1, 1)
-
-        -- Apply some translational camera shake.
-        return ValueLow * (ShakeDirection*CameraBlock.Strength)
-      end
-    };
+    end;
   })
   
   -- Activate the camera block so that it starts running, then deactivate the
