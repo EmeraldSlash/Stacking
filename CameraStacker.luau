@@ -6,7 +6,7 @@
 --
 -- Created by Rio Manson-Hay (@EmeraldSlash)
 --
--- Version: 6 (2026-05-29)
+-- Version: 7 (2026-06-24)
 
 -- Sets whether microprofiler labels are turned on or not.
 local PRF_ON = true
@@ -706,11 +706,13 @@ export type BlendContext = {
 	NewExclusiveHi_ByBlendable: {[Blendable<any>]: boolean};
 	WasExclusiveHi_ByBlendable: {[Blendable<any>]: boolean};
 
+	-- Read the current value of this Blendable from the stack.
 	Read: <T>(
 		Ctx: BlendContext,
 		Blendable: Blendable<T>,
 		OverrideExclusiveLo: boolean?
 	)->(T, boolean);
+	-- Write a new value for this Blendable to the stack.
 	Write: <T>(
 		Ctx: BlendContext,
 		Blendable: Blendable<T>,
@@ -718,6 +720,9 @@ export type BlendContext = {
 		OverrideExclusiveHi: boolean?,
 		OverrideRenderingOnly: boolean?
 	)->();
+	-- Given a Blendable present in the CB.Blendables table and the value
+	-- obtained therein, automatically write it, blending it with the current
+	-- value in the stack using CB.Strength as the blending factor.
 	Existing: <T>(
 		Ctx: BlendContext,
 		Blendable: Blendable<T>,
@@ -725,6 +730,9 @@ export type BlendContext = {
 		OverrideExclusiveHi: boolean?,
 		OverrideRenderingOnly: boolean?
 	)->();
+	-- Given a Blendable which is NOT in the CB.Blendables table and a value for
+	-- it, automatically write it, blending it with the current value in the
+	-- stack using CB.Strength as the blending factor.
 	Fresh: <T>(
 		Ctx: BlendContext,
 		Blendable: Blendable<T>,
@@ -844,6 +852,7 @@ function Ctx.Fresh<T>(
 	OverrideExclusiveHi: boolean?,
 	OverrideRenderingOnly: boolean?
 )
+	local CB = Ctx.CB
 	local Low = Ctx:Read(Blendable, OverrideExclusiveLo)
 	local NewValue = CameraStacker.Blend(Low, Value, CB.Strength, Blendable)
 	Ctx:Write(Blendable, NewValue, OverrideExclusiveHi, OverrideRenderingOnly)
